@@ -6,12 +6,15 @@
 //  Copyright 2006 Andy Matuschak. All rights reserved.
 //
 
+#if SPARKLE_BUILD_UI_BITS
+
 #import "SUUpdater.h"
 #import "SPUUpdater.h"
 #import "SPUStandardUserDriver.h"
 #import "SPUStandardUserDriverDelegate.h"
 #import "SPUUpdaterDelegate.h"
 #import "SULog.h"
+#import <AppKit/AppKit.h>
 
 @interface SUUpdater () <SPUUpdaterDelegate, SPUStandardUserDriverDelegate>
 
@@ -91,7 +94,6 @@ static NSMutableDictionary *sharedUpdaters = nil;
 // This will be used when the updater is instantiated in a nib such as MainMenu
 - (instancetype)init
 {
-    SULog(SULogLevelDefault, @"DEPRECATION: SUUpdater is deprecated in Sparkle 2 but functional for transitional purposes. Please migrate to SPUStandardUpdaterController as a nib instantiated replacement, or SPUUpdater.");
     return [self initForBundle:[NSBundle mainBundle]];
 }
 
@@ -493,3 +495,5 @@ static NSMutableDictionary *sharedUpdaters = nil;
 }
 
 @end
+
+#endif

@@ -6,21 +6,12 @@
 //  Copyright © 2020 Sparkle Project. All rights reserved.
 //
 
+#if SPARKLE_BUILD_UI_BITS
+
 #import "SULegacyWebView.h"
 #import "SUWebViewCommon.h"
 #import "SULog.h"
 #import <WebKit/WebKit.h>
-
-// WebKit protocols are not explicitly declared until 10.11 SDK, so
-// declare dummy protocols to keep the build working on earlier SDKs.
-#if __MAC_OS_X_VERSION_MAX_ALLOWED < 101100
-@protocol WebFrameLoadDelegate <NSObject>
-@end
-@protocol WebPolicyDelegate <NSObject>
-@end
-@protocol WebUIDelegate <NSObject>
-@end
-#endif
 
 @interface SULegacyWebView () <WebPolicyDelegate, WebFrameLoadDelegate, WebUIDelegate>
 
@@ -170,3 +161,5 @@
 }
 
 @end
+
+#endif

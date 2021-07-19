@@ -123,7 +123,7 @@
                 
                 NSMutableDictionary *userInfo = [NSMutableDictionary dictionaryWithDictionary:@{
                     NSLocalizedDescriptionKey: SULocalizedString(@"An error occurred while running the updater. Please try again later.", nil),
-                    NSLocalizedFailureReasonErrorKey:@"The remote port connection was invalidated from the updater. For additional details, please check Console logs for "@SPARKLE_RELAUNCH_TOOL_NAME
+                    NSLocalizedFailureReasonErrorKey:@"The remote port connection was invalidated from the updater. For additional details, please check Console logs for "@SPARKLE_RELAUNCH_TOOL_NAME". If your application is sandboxed, please also ensure Installer Connection & Status entitlements are correctly set up: https://sparkle-project.org/documentation/sandboxing/"
                 }];
                 
                 NSError *installerError = strongSelf.installerError;
@@ -141,8 +141,6 @@
     assert(installationType != nil);
     
     [self.installerConnection setServiceName:serviceName systemDomain:self.systemDomain];
-    
-    [self sendInstallationData];
 }
 
 // This can be called multiple times (eg: if a delta update fails, this may be called again with a regular update item)
@@ -348,7 +346,12 @@
         
         launcherConnection.invalidationHandler = ^{
             dispatch_async(dispatch_get_main_queue(), ^{
+#pragma clang diagnostic push
+#if __has_warning("-Wcompletion-handler")
+#pragma clang diagnostic ignored "-Wcompletion-handler"
+#endif
                 if (!madeReply) {
+#pragma clang diagnostic pop
                     // If something went horribly wrong, just guess that we won't require authorization
                     reply(NO);
                     
@@ -369,7 +372,12 @@
     
     [installerLauncher checkIfApplicationInstallationRequiresAuthorizationWithHostBundlePath:self.host.bundlePath reply:^(BOOL requiresAuthorization) {
         dispatch_async(dispatch_get_main_queue(), ^{
+#pragma clang diagnostic push
+#if __has_warning("-Wcompletion-handler")
+#pragma clang diagnostic ignored "-Wcompletion-handler"
+#endif
             if (!madeReply) {
+#pragma clang diagnostic pop
                 madeReply = YES;
                 [launcherConnection invalidate];
                 
@@ -405,7 +413,12 @@
         
         launcherConnection.invalidationHandler = ^{
             dispatch_async(dispatch_get_main_queue(), ^{
+#pragma clang diagnostic push
+#if __has_warning("-Wcompletion-handler")
+#pragma clang diagnostic ignored "-Wcompletion-handler"
+#endif
                 if (!retrievedLaunchStatus) {
+#pragma clang diagnostic pop
                     NSError *error =
                     [NSError errorWithDomain:SUSparkleErrorDomain code:SUInstallationError userInfo:@{ NSLocalizedDescriptionKey:SULocalizedString(@"An error occurred while connecting to the installer. Please try again later.", nil) }];
                     
@@ -448,11 +461,13 @@
     // Changing this authorization prompt is a little complicated because the
     // Auth database retains and caches the right we use, and there isn't a good way
     // of updating the prompt. See code in SUInstallerLauncher.m
+    // For this reason, we don't provide localized strings for this prompt yet
+    // (and I believe, the authorization framework has a different way of specifying localizations..)
     NSString *authorizationPrompt;
     if ([mainBundleName isEqualToString:hostName]) {
-        authorizationPrompt = [NSString stringWithFormat:SULocalizedString(@"%1$@ wants permission to update.", nil), hostName];
+        authorizationPrompt = [NSString stringWithFormat:@"%1$@ wants permission to update.", hostName];
     } else {
-        authorizationPrompt = [NSString stringWithFormat:SULocalizedString(@"%1$@ wants permission to update %2$@.", nil), mainBundleName, hostName];
+        authorizationPrompt = [NSString stringWithFormat:@"%1$@ wants permission to update %2$@.", mainBundleName, hostName];
     }
     
     NSString *mainBundleIdentifier;
@@ -480,6 +495,7 @@
                 case SUInstallerLauncherSuccess:
                     self.systemDomain = systemDomain;
                     [self setUpConnection];
+                    [self sendInstallationData];
                     completionHandler(nil);
                     break;
             }
@@ -530,6 +546,18 @@
     [self.installerConnection handleMessageWithIdentifier:SPUResumeInstallationToStage2 data:responseData];
     
     // the installer will send us SPUInstallationFinishedStage2 when stage 2 is done
+}
+
+- (void)cancelUpdate
+{
+    // Set up connection to the installer if one is not set up already
+    [self setUpConnection];
+    
+    self.aborted = YES;
+    
+    [self.installerConnection handleMessageWithIdentifier:SPUCancelInstallation data:[NSData data]];
+    
+    [self.delegate installerIsRequestingAbortInstallWithError:nil];
 }
 
 - (void)abortInstall

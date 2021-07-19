@@ -10,6 +10,8 @@
 //	Headers:
 // -----------------------------------------------------------------------------
 
+#if SPARKLE_BUILD_UI_BITS
+
 #import "SUUpdateAlert.h"
 
 #import "SUHost.h"
@@ -27,6 +29,7 @@
 #import "SUTouchBarForwardDeclarations.h"
 #import "SUTouchBarButtonGroup.h"
 #import "SPUXPCServiceInfo.h"
+#import "SPUUserUpdateState.h"
 
 static NSString *const SUUpdateAlertTouchBarIndentifier = @"" SPARKLE_BUNDLE_IDENTIFIER ".SUUpdateAlert";
 
@@ -36,7 +39,7 @@ static NSString *const SUUpdateAlertTouchBarIndentifier = @"" SPARKLE_BUNDLE_IDE
 @property (strong) SUHost *host;
 @property (nonatomic) BOOL allowsAutomaticUpdates;
 @property (nonatomic, copy, nullable) void(^completionBlock)(SPUUserUpdateChoice);
-@property (nonatomic) SPUUserUpdateState state;
+@property (nonatomic) SPUUserUpdateState *state;
 
 @property (strong) NSProgressIndicator *releaseNotesSpinner;
 
@@ -80,7 +83,7 @@ static NSString *const SUUpdateAlertTouchBarIndentifier = @"" SPARKLE_BUNDLE_IDE
 
 @synthesize webView = _webView;
 
-- (instancetype)initWithAppcastItem:(SUAppcastItem *)item state:(SPUUserUpdateState)state host:(SUHost *)aHost versionDisplayer:(id <SUVersionDisplay>)aVersionDisplayer completionBlock:(void (^)(SPUUserUpdateChoice))block
+- (instancetype)initWithAppcastItem:(SUAppcastItem *)item state:(SPUUserUpdateState *)state host:(SUHost *)aHost versionDisplayer:(id <SUVersionDisplay>)aVersionDisplayer completionBlock:(void (^)(SPUUserUpdateChoice))block
 {
     self = [super initWithWindowNibName:@"SUUpdateAlert"];
     if (self != nil) {
@@ -92,7 +95,7 @@ static NSString *const SUUpdateAlertTouchBarIndentifier = @"" SPARKLE_BUNDLE_IDE
         _completionBlock = [block copy];
         
         SPUUpdaterSettings *updaterSettings = [[SPUUpdaterSettings alloc] initWithHostBundle:host.bundle];
-        _allowsAutomaticUpdates = updaterSettings.allowsAutomaticUpdates && !item.isInformationOnlyUpdate;
+        _allowsAutomaticUpdates = updaterSettings.allowsAutomaticUpdates && updaterSettings.automaticallyChecksForUpdates && !item.informationOnlyUpdate;
         [self setShouldCascadeWindows:NO];
     }
     return self;
@@ -128,14 +131,33 @@ static NSString *const SUUpdateAlertTouchBarIndentifier = @"" SPARKLE_BUNDLE_IDE
 
 - (IBAction)openInfoURL:(id)__unused sender
 {
-    [[NSWorkspace sharedWorkspace] openURL:self.updateItem.infoURL];
+    NSURL *infoURL = self.updateItem.infoURL;
+    assert(infoURL);
+    
+    [[NSWorkspace sharedWorkspace] openURL:infoURL];
     
     [self endWithSelection:SPUUserUpdateChoiceDismiss];
 }
 
 - (IBAction)skipThisVersion:(id)__unused sender
 {
-    [self endWithSelection:SPUUserUpdateChoiceSkip];
+    if (self.updateItem.majorUpgrade) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.alertStyle = NSAlertStyleInformational;
+        alert.informativeText = SULocalizedString(@"Skipping this major upgrade will opt out of alerts for future updates.", nil);
+        alert.messageText = SULocalizedString(@"Are you sure you want to skip this upgrade?", nil);
+        
+        [alert addButtonWithTitle:SULocalizedString(@"Skip Upgrade", nil)];
+        [alert addButtonWithTitle:SULocalizedString(@"Don't Skip", nil)];
+        
+        [alert beginSheetModalForWindow:(NSWindow * _Nonnull)self.window completionHandler:^(NSModalResponse response) {
+            if (response == NSAlertFirstButtonReturn) {
+                [self endWithSelection:SPUUserUpdateChoiceSkip];
+            }
+        }];
+    } else {
+        [self endWithSelection:SPUUserUpdateChoiceSkip];
+    }
 }
 
 - (IBAction)remindMeLater:(id)__unused sender
@@ -167,13 +189,16 @@ static NSString *const SUUpdateAlertTouchBarIndentifier = @"" SPARKLE_BUNDLE_IDE
     // Otherwise we'll wait until the client wants us to show release notes
 	if (self.updateItem.releaseNotesURL == nil)
 	{
-        __weak __typeof__(self) weakSelf = self;
-        [self.webView loadHTMLString:[self.updateItem itemDescription] baseURL:nil completionHandler:^(NSError * _Nullable error) {
-            if (error != nil) {
-                SULog(SULogLevelError, @"Failed to load HTML string from web view: %@", error);
-            }
-            [weakSelf stopReleaseNotesSpinner];
-        }];
+        NSString *itemDescription = self.updateItem.itemDescription;
+        if (itemDescription != nil) {
+            __weak __typeof__(self) weakSelf = self;
+            [self.webView loadHTMLString:itemDescription baseURL:nil completionHandler:^(NSError * _Nullable error) {
+                if (error != nil) {
+                    SULog(SULogLevelError, @"Failed to load HTML string from web view: %@", error);
+                }
+                [weakSelf stopReleaseNotesSpinner];
+            }];
+        }
     }
 }
 
@@ -290,18 +315,12 @@ static NSString *const SUUpdateAlertTouchBarIndentifier = @"" SPARKLE_BUNDLE_IDE
         
         BOOL javaScriptEnabled = [self.host boolForInfoDictionaryKey:SUEnableJavaScriptKey];
         
-        BOOL useWKWebView;
-        if (@available(macOS 10.11, *)) {
-            // WKWebView has a bug where it won't work in loading local HTML content in sandboxed apps that do not have an outgoing network entitlement
-            // FB6993802: https://twitter.com/sindresorhus/status/1160577243929878528 | https://github.com/feedback-assistant/reports/issues/1
-            // If the developer is using the downloader XPC service, they are very most likely are a) sandboxed b) do not use outgoing network entitlement.
-            // In this case, fall back to legacy WebKit view.
-            // (In theory it is possible for a non-sandboxed app or sandboxed app with outgoing network entitlement to use the XPC service, it's just pretty unlikely. And falling back to a legacy web view would not be too harmful in those cases).
-            useWKWebView = !SPUXPCServiceExists(@DOWNLOADER_BUNDLE_ID);
-        } else {
-            // Never use WKWebView prior to macOS 10.11. Details are in SUWKWebView.m
-            useWKWebView = NO;
-        }
+        // WKWebView has a bug where it won't work in loading local HTML content in sandboxed apps that do not have an outgoing network entitlement
+        // FB6993802: https://twitter.com/sindresorhus/status/1160577243929878528 | https://github.com/feedback-assistant/reports/issues/1
+        // If the developer is using the downloader XPC service, they are very most likely are a) sandboxed b) do not use outgoing network entitlement.
+        // In this case, fall back to legacy WebKit view.
+        // (In theory it is possible for a non-sandboxed app or sandboxed app with outgoing network entitlement to use the XPC service, it's just pretty unlikely. And falling back to a legacy web view would not be too harmful in those cases).
+        BOOL useWKWebView = !SPUXPCServiceExists(@DOWNLOADER_BUNDLE_ID);
         
         if (useWKWebView) {
             self.webView = [[SUWKWebView alloc] initWithColorStyleSheetLocation:colorStyleURL fontFamily:defaultFontFamily fontPointSize:defaultFontSize javaScriptEnabled:javaScriptEnabled];
@@ -322,7 +341,7 @@ static NSString *const SUUpdateAlertTouchBarIndentifier = @"" SPARKLE_BUNDLE_IDE
         [self.window setLevel:NSFloatingWindowLevel]; // This means the window will float over all other apps, if our app is switched out ?!
     }
 
-    if (self.updateItem.isInformationOnlyUpdate) {
+    if (self.updateItem.informationOnlyUpdate) {
         [self.installButton setTitle:SULocalizedString(@"Learn More...", @"Alternate title for 'Install Update' button when there's no download in RSS feed.")];
         [self.installButton setAction:@selector(openInfoURL:)];
     }
@@ -356,10 +375,7 @@ static NSString *const SUUpdateAlertTouchBarIndentifier = @"" SPARKLE_BUNDLE_IDE
         }
     }
     
-    if (self.state == SPUUserUpdateStateInstalling) {
-        // An already downloaded & resumable update can't be skipped
-        self.skipButton.hidden = YES;
-        
+    if (self.state.stage == SPUUserUpdateStageInstalling) {
         // We're going to be relaunching pretty instantaneously
         self.installButton.title = SULocalizedString(@"Install and Relaunch", nil);
         
@@ -367,7 +383,7 @@ static NSString *const SUUpdateAlertTouchBarIndentifier = @"" SPARKLE_BUNDLE_IDE
         self.laterButton.title = SULocalizedString(@"Install on Quit", @"Alternate title for 'Remind Me Later' button when downloaded updates can be resumed");
     }
 
-    if ([self.updateItem isCriticalUpdate]) {
+    if (self.updateItem.criticalUpdate && !self.updateItem.majorUpgrade) {
         self.skipButton.hidden = YES;
         self.laterButton.hidden = YES;
     }
@@ -393,11 +409,11 @@ static NSString *const SUUpdateAlertTouchBarIndentifier = @"" SPARKLE_BUNDLE_IDE
 
 - (NSString *)titleText
 {
-    if ([self.updateItem isCriticalUpdate])
+    if (self.updateItem.criticalUpdate)
     {
         return [NSString stringWithFormat:SULocalizedString(@"An important update to %@ is ready to install", nil), [self.host name]];
     }
-    else if (self.state == SPUUserUpdateStateDownloaded || self.state == SPUUserUpdateStateInstalling)
+    else if (self.state.stage == SPUUserUpdateStageDownloaded || self.state.stage == SPUUserUpdateStageInstalling)
     {
         return [NSString stringWithFormat:SULocalizedString(@"A new version of %@ is ready to install!", nil), [self.host name]];
     }
@@ -422,16 +438,16 @@ static NSString *const SUUpdateAlertTouchBarIndentifier = @"" SPARKLE_BUNDLE_IDE
     // We display a different summary depending on if it's an "info-only" item, or a "critical update" item, or if we've already downloaded the update and just need to relaunch
     NSString *finalString = nil;
 
-    if (self.updateItem.isInformationOnlyUpdate) {
+    if (self.updateItem.informationOnlyUpdate) {
         finalString = [NSString stringWithFormat:SULocalizedString(@"%@ %@ is now available--you have %@. Would you like to learn more about this update on the web?", @"Description text for SUUpdateAlert when the update informational with no download."), self.host.name, updateItemVersion, hostVersion];
-    } else if ([self.updateItem isCriticalUpdate]) {
-        if (self.state == SPUUserUpdateStateNotDownloaded) {
+    } else if (self.updateItem.criticalUpdate) {
+        if (self.state.stage == SPUUserUpdateStageNotDownloaded) {
             finalString = [NSString stringWithFormat:SULocalizedString(@"%@ %@ is now available--you have %@. This is an important update; would you like to download it now?", @"Description text for SUUpdateAlert when the critical update is downloadable."), self.host.name, updateItemVersion, hostVersion];
         } else {
             finalString = [NSString stringWithFormat:SULocalizedString(@"%1$@ %2$@ has been downloaded and is ready to use! This is an important update; would you like to install it and relaunch %1$@ now?", @"Description text for SUUpdateAlert when the critical update has already been downloaded and ready to install."), self.host.name, updateItemVersion];
         }
     } else {
-        if (self.state == SPUUserUpdateStateNotDownloaded) {
+        if (self.state.stage == SPUUserUpdateStageNotDownloaded) {
             finalString = [NSString stringWithFormat:SULocalizedString(@"%@ %@ is now available--you have %@. Would you like to download it now?", @"Description text for SUUpdateAlert when the update is downloadable."), self.host.name, updateItemVersion, hostVersion];
         } else {
             finalString = [NSString stringWithFormat:SULocalizedString(@"%1$@ %2$@ has been downloaded and is ready to use! Would you like to install it and relaunch %1$@ now?", @"Description text for SUUpdateAlert when the update has already been downloaded and ready to install."), self.host.name, updateItemVersion];
@@ -460,3 +476,5 @@ static NSString *const SUUpdateAlertTouchBarIndentifier = @"" SPARKLE_BUNDLE_IDE
 }
 
 @end
+
+#endif

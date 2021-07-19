@@ -16,14 +16,14 @@
 // If we ever enable auto-synthesize in the future, we'll still need this synthesize
 // because the property is declared in a protocol
 @synthesize updateItem = _updateItem;
-@synthesize preventsAutoupdate = _preventsAutoupdate;
+@synthesize secondaryUpdateItem = _secondaryUpdateItem;
 
-- (instancetype)initWithAppcastItem:(SUAppcastItem *)updateItem preventsAutoupdate:(BOOL)preventsAutoupdate
+- (instancetype)initWithAppcastItem:(SUAppcastItem *)updateItem secondaryAppcastItem:(SUAppcastItem * _Nullable)secondaryUpdateItem
 {
     self = [super init];
     if (self != nil) {
         _updateItem = updateItem;
-        _preventsAutoupdate = preventsAutoupdate;
+        _secondaryUpdateItem = secondaryUpdateItem;
     }
     return self;
 }

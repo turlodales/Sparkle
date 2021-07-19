@@ -8,6 +8,7 @@
 
 #import "SUPopUpTitlebarUserDriver.h"
 #import "SUInstallUpdateViewController.h"
+#import <AppKit/AppKit.h>
 
 @interface SUPopUpTitlebarUserDriver()
 
@@ -107,7 +108,7 @@
 
 #pragma mark Update Found
 
-- (void)showUpdateWithAppcastItem:(SUAppcastItem *)appcastItem skippable:(BOOL)skippable reply:(void (^)(SPUUserUpdateChoice))reply
+- (void)showUpdateWithAppcastItem:(SUAppcastItem *)appcastItem reply:(void (^)(SPUUserUpdateChoice))reply
 {
     NSPopover *popover = [[NSPopover alloc] init];
     popover.behavior = NSPopoverBehaviorTransient;
@@ -115,7 +116,7 @@
     __weak SUPopUpTitlebarUserDriver *weakSelf = self;
     __block NSButton *actionButton = nil;
     
-    SUInstallUpdateViewController *viewController = [[SUInstallUpdateViewController alloc] initWithAppcastItem:appcastItem skippable:skippable reply:^(SPUUserUpdateChoice choice) {
+    SUInstallUpdateViewController *viewController = [[SUInstallUpdateViewController alloc] initWithAppcastItem:appcastItem reply:^(SPUUserUpdateChoice choice) {
         reply(choice);
         
         [popover close];
@@ -133,26 +134,18 @@
     }];
 }
 
-- (void)showUpdateFoundWithAppcastItem:(SUAppcastItem *)appcastItem userInitiated:(BOOL)userInitiated state:(SPUUserUpdateState)state reply:(void (^)(SPUUserUpdateChoice))reply
+- (void)showUpdateFoundWithAppcastItem:(SUAppcastItem *)appcastItem state:(SPUUserUpdateState *)state reply:(void (^)(SPUUserUpdateChoice))reply
 {
-    switch (state) {
-        case SPUUserUpdateStateInformational:
-            // Todo: show user interface for this
-            NSLog(@"Found info URL: %@", appcastItem.infoURL);
-            
-            // Remove UI from user initiated check
-            [self removeUpdateButton];
-            
-            reply(SPUUserUpdateChoiceDismiss);
-            
-            break;
-        case SPUUserUpdateStateNotDownloaded:
-        case SPUUserUpdateStateDownloaded:
-            [self showUpdateWithAppcastItem:appcastItem skippable:YES reply:reply];
-            break;
-        case SPUUserUpdateStateInstalling:
-            [self showUpdateWithAppcastItem:appcastItem skippable:NO reply:reply];
-            break;
+    if (appcastItem.informationOnlyUpdate) {
+        // Todo: show user interface for this
+        NSLog(@"Found info URL: %@", appcastItem.infoURL);
+        
+        // Remove UI from user initiated check
+        [self removeUpdateButton];
+        
+        reply(SPUUserUpdateChoiceDismiss);
+    } else {
+        [self showUpdateWithAppcastItem:appcastItem reply:reply];
     }
 }
 

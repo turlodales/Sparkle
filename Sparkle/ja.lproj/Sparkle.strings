@@ -14,6 +14,14 @@
 
 "%@ %@ is currently the newest version available.\n(You are currently running version %@.)" = "%1$@ %2$@は現在入手できる最新バージョンです。\n（現在使用中のバージョンは%3$@です。）";
 
+"An error occurred while running the updater. Please try again later." = "アップデータを実行中にエラーが発生しました。あとでやり直してください。";
+
+"An error occurred while starting the installer. Please try again later." = "インストーラを始動中にエラーが発生しました。あとでやり直してください。";
+
+"An error occurred while connecting to the installer. Please try again later." = "インストーラに接続中にエラーが発生しました。あとでやり直してください。";
+
+"An error occurred while launching the installer. Please try again later." = "インストーラを起動中にエラーが発生しました。あとでやり直してください。";
+
 "Update Installed" = "アップデートがインストールされました";
 
 "%@ is now updated to version %@!" = "%@はバージョン%@にアップデートされました!";
@@ -25,6 +33,9 @@
 
 /* Description text for SUUpdateAlert when the update informational with no download. */
 "%@ %@ is now available--you have %@. Would you like to learn more about this update on the web?" = "%1$@ %2$@が入手できます（使用中のバージョンは%3$@です）。このアップデートの詳しい情報をWebで確認しますか?";
+
+/* Critical downloadable update */
+"%@ %@ is now available--you have %@. This is an important update; would you like to download it now?" = "%1$@ %2$@が入手できます（使用中のバージョンは%3$@です）。これは重要なアップデートです。今すぐダウンロードしますか?";
 
 "%@ downloaded" = "%@ダウンロード済み";
 
@@ -43,6 +54,10 @@
 "An error occurred while installing the update. Please try again later." = "アップデートをインストール中にエラーが発生しました。あとでやり直してください。";
 
 "An error occurred while parsing the update feed." = "アップデートフィードを解析中にエラーが発生しました。";
+
+"An error occurred while downloading the update feed." = "アップデートフィードをダウンロード中にエラーが発生しました。";
+
+"Failed to resume installing update." = "アップデートのインストール再開に失敗しました。";
 
 "An error occurred while relaunching %1$@, but the new version will be available next time you run %1$@." = "%1$@を再起動中にエラーが発生しましたが、次回%1$@の実行時に新しいバージョンが利用できます。";
 
@@ -68,8 +83,22 @@
 
 "Install and Relaunch" = "インストールして再起動";
 
+"Install on Quit" = "終了時にインストール";
+
 /* Take care not to overflow the status window. */
 "Installing update..." = "アップデートをインストールしています…";
+
+/* Title confirmation for skipping major upgrade and future updates */
+"Are you sure you want to skip this upgrade?" = "このアップグレードをスキップしてもよろしいですか?";
+
+/* Confirmation message for skipping major upgrade and future updates */
+"Skipping this major upgrade will opt out of alerts for future updates." = "このメジャーアップグレードをスキップすると、今後のアップデートも通知されなくなります。";
+
+/* Skipping major upgrade */
+"Skip Upgrade" = "アップグレードをスキップ";
+
+/* Not skipping a major upgrade */
+"Don't Skip" = "スキップしない";
 
 /* the unit for kilobytes */
 "KB" = "KB";

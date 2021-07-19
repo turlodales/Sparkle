@@ -14,9 +14,6 @@
 
 "%@ %@ is currently the newest version available.\n(You are currently running version %@.)" = "%1$@ %2$@ is currently the newest version available.\n(You are currently running version %3$@.)";
 
-/* An appcast feed error when checking for updates and no appcast items are retrieved */
-"No valid update information could be loaded." = "No valid update information could be loaded.";
-
 "An error occurred while running the updater. Please try again later." = "An error occurred while running the updater. Please try again later.";
 
 "An error occurred while starting the installer. Please try again later." = "An error occurred while starting the installer. Please try again later.";
@@ -66,6 +63,10 @@
 
 "An important update to %@ is ready to install" = "An important update to %@ is ready to install";
 
+"Unable to Check For Updates" = "Unable to Check For Updates";
+
+"The update checker failed to start correctly. You should contact the app developer to report this issue and verify that you have the latest version" = "The update checker failed to start correctly. You should contact the app developer to report this issue and verify that you have the latest version";
+
 /* the unit for bytes */
 "B" = "B";
 
@@ -90,6 +91,18 @@
 
 /* Take care not to overflow the status window. */
 "Installing update..." = "Installing update…";
+
+/* Title confirmation for skipping major upgrade and future updates */
+"Are you sure you want to skip this upgrade?" = "Are you sure you want to skip this upgrade?";
+
+/* Confirmation message for skipping major upgrade and future updates */
+"Skipping this major upgrade will opt out of alerts for future updates." = "Skipping this major upgrade will opt out of alerts for future updates.";
+
+/* Skipping major upgrade */
+"Skip Upgrade" = "Skip Upgrade";
+
+/* Not skipping a major upgrade */
+"Don't Skip" = "Don't Skip";
 
 /* the unit for kilobytes */
 "KB" = "KB";
@@ -121,6 +134,17 @@
 
 /* Status message shown when the user checks for updates but is already current or the feed doesn't contain any updates. */
 "You're up-to-date!" = "You’re up to date!";
+
+"Your macOS version is too old" = "Your macOS version is too old";
+
+"%1$@ %2$@ is available but your macOS version is too old to install it. At least macOS %3$@ is required." = "%1$@ %2$@ is available but your macOS version is too old to install it. At least macOS %3$@ is required.";
+
+"Your macOS version is too new" = "Your macOS version is too new";
+
+"%1$@ %2$@ is available but your macOS version is too new for this update. This update only supports up to macOS %3$@." = "%1$@ %2$@ is available but your macOS version is too new for this update. This update only supports up to macOS %3$@.";
+
+/* Used when a new update is not found */
+"Version History" = "Version History";
 
 /* Authorization message shown when app wants permission to update itself. */
 "%1$@ wants permission to update." = "%1$@ wants permission to update.";

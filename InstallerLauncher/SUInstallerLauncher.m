@@ -14,8 +14,8 @@
 #import "SPULocalCacheDirectory.h"
 #import "SPUInstallationType.h"
 #import "SUHost.h"
+#import <ImageIO/ImageIO.h>
 #import <ServiceManagement/ServiceManagement.h>
-
 
 #include "AppKitPrevention.h"
 
@@ -56,7 +56,10 @@
         // We could invoke SMJobCopyDictionary() first to see if the job exists, but I'd rather avoid
         // using it because the headers indicate it may be removed one day without any replacement
         CFErrorRef removeError = NULL;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
         if (!SMJobRemove(domain, (__bridge CFStringRef)(label), auth, true, &removeError)) {
+#pragma clang diagnostic pop
             if (removeError != NULL) {
                 // It's normal for a job to not be found, so this is not an interesting error
                 if (CFErrorGetCode(removeError) != kSMErrorJobNotFound) {
@@ -77,7 +80,12 @@
         jobDictionary[@"MachServices"] = @{SPUStatusInfoServiceNameForBundleIdentifier(hostBundleIdentifier) : @YES};
         
         CFErrorRef submitError = NULL;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        // SMJobSubmit is deprecated but is the only way to submit a non-permanent
+        // helper and allows us to submit to user domain without requiring authorization
         submittedJob = SMJobSubmit(domain, (__bridge CFDictionaryRef)(jobDictionary), auth, &submitError);
+#pragma clang diagnostic pop
         if (!submittedJob) {
             if (submitError != NULL) {
                 SULog(SULogLevelError, @"Submit progress error: %@", submitError);
@@ -101,11 +109,19 @@
     NSString *hostBundleIdentifier = hostBundle.bundleIdentifier;
     assert(hostBundleIdentifier != nil);
     
+    NSString *homeDirectory = NSHomeDirectory();
+    assert(homeDirectory != nil);
+    
+    NSString *userName = NSUserName();
+    assert(userName != nil);
+    
     // The first argument has to be the path to the program, and the second is a host identifier so that the installer knows what mach services to host
+    // The third and forth arguments are for home directory and user name which only pkg installer scripts may need
     // We intentionally do not pass any more arguments. Anything else should be done via IPC.
     // This is compatible to SMJobBless() which does not allow arguments
     // Even though we aren't using that function for now, it'd be wise to not decrease compatibility to it
-    NSArray<NSString *> *arguments = @[installerPath, hostBundleIdentifier];
+    
+    NSArray<NSString *> *arguments = @[installerPath, hostBundleIdentifier, homeDirectory, userName];
     
     AuthorizationRef auth = NULL;
     OSStatus createStatus = AuthorizationCreate(NULL, kAuthorizationEmptyEnvironment, kAuthorizationFlagDefaults, &auth);
@@ -239,7 +255,10 @@
         // We could invoke SMJobCopyDictionary() first to see if the job exists, but I'd rather avoid
         // using it because the headers indicate it may be removed one day without any replacement
         CFErrorRef removeError = NULL;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
         if (!SMJobRemove(domain, (__bridge CFStringRef)(label), auth, true, &removeError)) {
+#pragma clang diagnostic pop
             if (removeError != NULL) {
                 // It's normal for a job to not be found, so this is not an interesting error
                 if (CFErrorGetCode(removeError) != kSMErrorJobNotFound) {
@@ -252,7 +271,12 @@
         NSDictionary *jobDictionary = @{@"Label" : label, @"ProgramArguments" : arguments, @"EnableTransactions" : @NO, @"KeepAlive" : @{@"SuccessfulExit" : @NO}, @"RunAtLoad" : @NO, @"Nice" : @0, @"LaunchOnlyOnce": @YES, @"MachServices" : @{SPUInstallerServiceNameForBundleIdentifier(hostBundleIdentifier) : @YES, SPUProgressAgentServiceNameForBundleIdentifier(hostBundleIdentifier) : @YES}};
         
         CFErrorRef submitError = NULL;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        // SMJobSubmit is deprecated but is the only way to submit a non-permanent
+        // helper and allows us to submit to user domain without requiring authorization
         submittedJob = SMJobSubmit(domain, (__bridge CFDictionaryRef)(jobDictionary), auth, &submitError);
+#pragma clang diagnostic pop
         if (!submittedJob) {
             if (submitError != NULL) {
                 SULog(SULogLevelError, @"Submit error: %@", submitError);
@@ -337,8 +361,16 @@ static BOOL SPUNeedsSystemAuthorizationAccess(NSString *path, NSString *installa
 - (void)launchInstallerWithHostBundlePath:(NSString *)hostBundlePath updaterIdentifier:(NSString *)updaterIdentifier authorizationPrompt:(NSString *)authorizationPrompt installationType:(NSString *)installationType allowingDriverInteraction:(BOOL)allowingDriverInteraction allowingUpdaterInteraction:(BOOL)allowingUpdaterInteraction completion:(void (^)(SUInstallerLauncherStatus, BOOL))completionHandler
 {
     dispatch_async(dispatch_get_main_queue(), ^{
-        NSBundle *hostBundle = [NSBundle bundleWithPath:hostBundlePath];
         BOOL needsSystemAuthorization = SPUNeedsSystemAuthorizationAccess(hostBundlePath, installationType);
+        
+        NSBundle *hostBundle = [NSBundle bundleWithPath:hostBundlePath];
+        if (hostBundle == nil) {
+            SULog(SULogLevelError, @"InstallerLauncher failed to create bundle at %@", hostBundlePath);
+            SULog(SULogLevelError, @"Please make sure InstallerLauncher is not sandboxed and do not sign your app by passing --deep. Check: codesign -d --entitlements :- \"%@\"", NSBundle.mainBundle.bundlePath);
+            SULog(SULogLevelError, @"More information regarding sandboxing: https://sparkle-project.org/documentation/sandboxing/");
+            completionHandler(SUInstallerLauncherFailure, needsSystemAuthorization);
+            return;
+        }
         
         if (needsSystemAuthorization && !allowingUpdaterInteraction) {
             SULog(SULogLevelError, @"Updater is not allowing interaction to the launcher.");
@@ -419,6 +451,7 @@ static BOOL SPUNeedsSystemAuthorizationAccess(NSString *path, NSString *installa
             }
         } else if (installerStatus == SUInstallerLauncherFailure) {
             SULog(SULogLevelError, @"Failed to submit installer job");
+            SULog(SULogLevelError, @"If your application is sandboxed please follow steps at: https://sparkle-project.org/documentation/sandboxing/");
         }
         
         if (installerStatus == SUInstallerLauncherCanceled) {

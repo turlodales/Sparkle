@@ -10,14 +10,17 @@
 #import "SUFileManager.h"
 #import "SUExport.h"
 #import "SUAppcast.h"
+#import "SUAppcast+Private.h"
 #import "SUAppcastItem.h"
 #import "SUAppcastDriver.h"
 #import "SUVersionComparisonProtocol.h"
 #import "SUStandardVersionComparator.h"
 #import "SUUpdateValidator.h"
 #import "SUHost.h"
+#import "SPUSkippedUpdate.h"
 #import "SUSignatures.h"
 #import "SPUInstallationType.h"
+#import "SPUAppcastItemStateResolver.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -37,14 +40,9 @@ static const char *SUAppleQuarantineIdentifier = "com.apple.quarantine";
 
 + (SUAppcastItem *)bestItemFromAppcastItems:(NSArray *)appcastItems getDeltaItem:(SUAppcastItem *_Nullable __autoreleasing *_Nullable)deltaItem withHostVersion:(NSString *)hostVersion comparator:(id<SUVersionComparison>)comparator;
 
-+ (SUAppcast *)filterSupportedAppcast:(SUAppcast *)appcast phasedUpdateGroup:(NSNumber * _Nullable)phasedUpdateGroup;
++ (SUAppcast *)filterSupportedAppcast:(SUAppcast *)appcast phasedUpdateGroup:(NSNumber * _Nullable)phasedUpdateGroup skippedUpdate:(SPUSkippedUpdate * _Nullable)skippedUpdate currentDate:(NSDate *)currentDate hostVersion:(NSString *)hostVersion versionComparator:(id<SUVersionComparison>)versionComparator testOSVersion:(BOOL)testOSVersion testMinimumAutoupdateVersion:(BOOL)testMinimumAutoupdateVersion;
 
-@end
-
-
-@interface SUAppcast (Private)
-
--(nullable NSArray *)parseAppcastItemsFromXMLData:(NSData *)appcastData relativeToURL:(nullable NSURL *)appcastURL error:(NSError *__autoreleasing*)errorp;
++ (SUAppcast *)filterAppcast:(SUAppcast *)appcast forMacOSAndAllowedChannels:(NSSet<NSString *> *)allowedChannels;
 
 @end
 

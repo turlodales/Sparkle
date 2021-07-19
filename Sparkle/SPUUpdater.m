@@ -61,7 +61,7 @@ NSString *const SUUpdaterAppcastNotificationKey = @"SUUpdaterAppCastNotification
 @property (nonatomic, copy) NSDate *updateLastCheckedDate;
 
 @property (nonatomic) BOOL loggedATSWarning;
-@property (nonatomic) BOOL loggedDSAWarning;
+@property (nonatomic) BOOL loggedNoSecureKeyWarning;
 
 @end
 
@@ -84,7 +84,7 @@ NSString *const SUUpdaterAppcastNotificationKey = @"SUUpdaterAppCastNotification
 @synthesize showingPermissionRequest = _showingPermissionRequest;
 @synthesize updateLastCheckedDate = _updateLastCheckedDate;
 @synthesize loggedATSWarning = _loggedATSWarning;
-@synthesize loggedDSAWarning = _loggedDSAWarning;
+@synthesize loggedNoSecureKeyWarning = _loggedNoSecureKeyWarning;
 
 #if DEBUG
 + (void)load
@@ -144,6 +144,10 @@ NSString *const SUUpdaterAppcastNotificationKey = @"SUUpdaterAppCastNotification
 
 - (BOOL)startUpdater:(NSError * __autoreleasing *)error
 {
+    if (self.startedUpdater) {
+        return YES;
+    }
+    
     if (![self checkIfConfiguredProperlyAndRequireFeedURL:NO error:error]) {
         return NO;
     }
@@ -211,17 +215,18 @@ NSString *const SUUpdaterAppcastNotificationKey = @"SUUpdaterAppCastNotification
         }
     }
     
+    NSBundle *mainBundle = [NSBundle mainBundle];
+    BOOL updatingMainBundle = [self.host.bundle isEqualTo:mainBundle];
+    
     if (feedURL != nil) {
         servingOverHttps = [[[feedURL scheme] lowercaseString] isEqualToString:@"https"];
         if (!servingOverHttps) {
             BOOL foundXPCPersistentDownloaderService = NO;
             BOOL foundATSPersistentIssue = [self checkATSIssueForBundle:SPUXPCServiceBundle(@DOWNLOADER_BUNDLE_ID) getBundleExists:&foundXPCPersistentDownloaderService];
             
-            NSBundle *mainBundle = [NSBundle mainBundle];
             BOOL foundATSMainBundleIssue = NO;
             if (!foundATSPersistentIssue && !foundXPCPersistentDownloaderService) {
                 BOOL foundATSIssue = ([mainBundle objectForInfoDictionaryKey:@"NSAppTransportSecurity"] == nil);
-                BOOL updatingMainBundle = [self.host.bundle isEqualTo:mainBundle];
                 
                 if (updatingMainBundle) {
                     // The only way we'll know for sure if there is an issue is if the main bundle is the same as the one we're updating
@@ -241,8 +246,9 @@ NSString *const SUUpdaterAppcastNotificationKey = @"SUUpdaterAppCastNotification
         }
     }
     
-    BOOL hasPublicKey = self.host.publicKeys.hasAnyKeys;
-    if (!hasPublicKey) {
+    SUPublicKeys *publicKeys = self.host.publicKeys;
+    BOOL hasAnyPublicKey = publicKeys.hasAnyKeys;
+    if (!hasAnyPublicKey) {
         // If we failed to retrieve a DSA key but the bundle specifies a path to one, we should consider this a configuration failure
         NSString *publicDSAKeyFileKey = [self.host publicDSAKeyFileKey];
         if (publicDSAKeyFileKey != nil) {
@@ -253,18 +259,33 @@ NSString *const SUUpdaterAppcastNotificationKey = @"SUUpdaterAppCastNotification
         }
     }
 
-    if (!hasPublicKey) {
+    if (!hasAnyPublicKey) {
         if ((feedURL != nil && !servingOverHttps) || ![SUCodeSigningVerifier bundleAtURLIsCodeSigned:[[self hostBundle] bundleURL]]) {
             if (error != NULL) {
                 *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUNoPublicDSAFoundError userInfo:@{ NSLocalizedDescriptionKey: [NSString stringWithFormat:@"For security reasons, updates need to be signed with an EdDSA key for %@. See Sparkle's documentation for more information.", hostName] }];
             }
             return NO;
         } else {
-            if (!self.loggedDSAWarning) {
-                SULog(SULogLevelDefault, @"DEPRECATION: Serving updates without an EdDSA key is now deprecated and may be removed from a future release. See Sparkle's documentation for more information.");
+            if (updatingMainBundle && !self.loggedNoSecureKeyWarning) {
+                SULog(SULogLevelError, @"Error: Serving updates without an EdDSA key and only using Apple Code Signing is deprecated and may be unsupported in a future release. Visit Sparkle's documentation for more information: https://sparkle-project.org/documentation/#3-segue-for-security-concerns");
                 
-                self.loggedDSAWarning = YES;
+                self.loggedNoSecureKeyWarning = YES;
             }
+        }
+    } else if (publicKeys.ed25519PubKey == nil) {
+        // No EdDSA key is available, so app must be using DSA
+        if (updatingMainBundle && !self.loggedNoSecureKeyWarning) {
+            SULog(SULogLevelError, @"Error: Serving updates without an EdDSA key is insecure and deprecated. DSA support may be removed in a future Sparkle release. Please migrate to using EdDSA (ed25519). Visit Sparkle's documentation for migration information: https://sparkle-project.org/documentation/#3-segue-for-security-concerns");
+            
+            self.loggedNoSecureKeyWarning = YES;
+        }
+    }
+    
+    // Check XPC Services are functional
+    NSBundle *sparkleBundle = [NSBundle bundleForClass:[self class]];
+    for (NSString *xpcServiceID in @[@INSTALLER_LAUNCHER_BUNDLE_ID, @DOWNLOADER_BUNDLE_ID, @INSTALLER_CONNECTION_BUNDLE_ID, @INSTALLER_STATUS_BUNDLE_ID]) {
+        if (!SPUXPCValidateServiceIfBundleExists(xpcServiceID, sparkleBundle, error)) {
+            return NO;
         }
     }
     
@@ -423,6 +444,7 @@ NSString *const SUUpdaterAppcastNotificationKey = @"SUUpdaterAppCastNotification
     
     if (self.sessionInProgress) {
         SULog(SULogLevelError, @"Error: -checkForUpdatesInBackground called but .sessionInProgress == YES");
+        return;
     }
     
     self.sessionInProgress = YES;
@@ -488,6 +510,7 @@ NSString *const SUUpdaterAppcastNotificationKey = @"SUUpdaterAppCastNotification
     
     if (self.sessionInProgress) {
         SULog(SULogLevelError, @"Error: -checkForUpdates called but .sessionInProgress == YES");
+        return;
     }
     
     if (self.driver != nil) {
@@ -529,6 +552,7 @@ NSString *const SUUpdaterAppcastNotificationKey = @"SUUpdaterAppCastNotification
     
     if (self.sessionInProgress) {
         SULog(SULogLevelError, @"Error: -checkForUpdateInformation called but .sessionInProgress == YES");
+        return;
     }
     
     self.sessionInProgress = YES;
@@ -766,10 +790,9 @@ NSString *const SUUpdaterAppcastNotificationKey = @"SUUpdaterAppCastNotification
 }
 
 static NSString *escapeURLComponent(NSString *str) {
-    return [[[[str stringByAddingPercentEscapesUsingEncoding:NSUTF8StringEncoding]
-             stringByReplacingOccurrencesOfString:@"=" withString:@"%3d"]
-             stringByReplacingOccurrencesOfString:@"&" withString:@"%26"]
-             stringByReplacingOccurrencesOfString:@"+" withString:@"%2b"];
+    NSString *escapedString = [str stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLQueryAllowedCharacterSet];
+    
+    return [[[escapedString stringByReplacingOccurrencesOfString:@"=" withString:@"%3d"] stringByReplacingOccurrencesOfString:@"&" withString:@"%26"] stringByReplacingOccurrencesOfString:@"+" withString:@"%2b"];
 }
 
 // Precondition: The feed URL should be valid

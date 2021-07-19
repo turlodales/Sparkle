@@ -17,7 +17,16 @@
 #else
 #import <Foundation/Foundation.h>
 #endif
+
+#if defined(BUILDING_SPARKLE_TOOL) || defined(BUILDING_SPARKLE_TESTS)
+// Ignore incorrect warning
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wquoted-include-in-framework-header"
 #import "SUExport.h"
+#pragma clang diagnostic pop
+#else
+#import <Sparkle/SUExport.h>
+#endif
 
 /**
  * Error domain used by Sparkle
@@ -68,5 +77,17 @@ typedef NS_ENUM(OSStatus, SUError) {
     // API misuse errors.
     SUIncorrectAPIUsageError = 5000
 };
+
+typedef NS_ENUM(OSStatus, SPUNoUpdateFoundReason) {
+    SPUNoUpdateFoundReasonUnknown,
+    SPUNoUpdateFoundReasonOnLatestVersion,
+    SPUNoUpdateFoundReasonOnNewerThanLatestVersion,
+    SPUNoUpdateFoundReasonSystemIsTooOld,
+    SPUNoUpdateFoundReasonSystemIsTooNew
+};
+
+SU_EXPORT extern NSString *const SPUNoUpdateFoundReasonKey;
+SU_EXPORT extern NSString *const SPULatestAppcastItemFoundKey;
+SU_EXPORT extern NSString *const SPUNoUpdateFoundUserInitiatedKey;
 
 #endif
