@@ -16,33 +16,25 @@
 #import "SULog.h"
 #import "SUSignatures.h"
 #import "SUErrors.h"
+#import "SPUVerifierInformation.h"
+#import "SUConstants.h"
+#if SPARKLE_BUILD_LEGACY_DSA_SUPPORT
 #include <CommonCrypto/CommonDigest.h>
-#import "ed25519.h" // Run `git submodule update --init` if you get an error here
+#endif
+#import "ed25519.h"
 
 
 #include "AppKitPrevention.h"
 
-@interface SUSignatureVerifier ()
-@property (readonly) SUPublicKeys *pubKeys;
-@end
-
-@implementation SUSignatureVerifier {
+@implementation SUSignatureVerifier
+{
+    SUPublicKeys *_pubKeys;
 }
 
-@synthesize pubKeys = _pubKeys;
-
-+ (BOOL)validatePath:(NSString *)path withSignatures:(SUSignatures *)signatures withPublicKeys:(SUPublicKeys *)pkeys error:(NSError * __autoreleasing *)error
++ (BOOL)validatePath:(NSString *)path withSignatures:(SUSignatures *)signatures withPublicKeys:(SUPublicKeys *)pkeys verifierInformation:(SPUVerifierInformation * _Nullable)verifierInformation error:(NSError * __autoreleasing *)error
 {
     SUSignatureVerifier *verifier = [(SUSignatureVerifier *)[self alloc] initWithPublicKeys:pkeys];
-
-    if (verifier == nil) {
-        if (error != NULL) {
-            *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUValidationError userInfo:@{ NSLocalizedDescriptionKey: @"Failed to create SUSignatureVerifier instance" }];
-        }
-        return NO;
-    }
-
-    return [verifier verifyFileAtPath:path signatures:signatures error:error];
+    return [verifier verifyFileAtPath:path signatures:signatures verifierInformation:verifierInformation error:error];
 }
 
 - (instancetype)initWithPublicKeys:(SUPublicKeys *)pubkeys
@@ -54,9 +46,10 @@
     return self;
 }
 
-- (SecKeyRef)dsaSecKeyRef {
-
-    NSData *data = [self.pubKeys.dsaPubKey dataUsingEncoding:NSASCIIStringEncoding];
+#if SPARKLE_BUILD_LEGACY_DSA_SUPPORT
+- (SecKeyRef)dsaSecKeyRef SPU_OBJC_DIRECT
+{
+    NSData *data = [_pubKeys.dsaPubKey dataUsingEncoding:NSASCIIStringEncoding];
     if (!self || !data.length) {
         SULog(SULogLevelError, @"Could not read public DSA key");
         return nil;
@@ -89,32 +82,62 @@
     CFRelease(items);
     return dsaPubKeySecKey;
 }
+#endif
 
-- (BOOL)verifyFileAtPath:(NSString *)path signatures:(SUSignatures *)signatures error:(NSError * __autoreleasing *)error
+- (BOOL)verifyFileAtPath:(NSString *)path signatures:(SUSignatures *)signatures verifierInformation:(SPUVerifierInformation * _Nullable)verifierInformation error:(NSError * __autoreleasing *)error
 {
-    if (!path || !path.length) {
-        if (error != NULL) {
-            *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUValidationError userInfo:@{ NSLocalizedDescriptionKey: @"Path passed to verify has zero length and is not valid" }];
+    // Data is used only in the case where ed25519 signature is present
+    NSData *data;
+    if (signatures.ed25519SignatureStatus != SUSigningInputStatusPresent) {
+        data = nil;
+    } else {
+        NSError *dataError = nil;
+        data = [NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:&dataError];
+        
+        if (data == nil || data.length == 0) {
+            SULog(SULogLevelError, @"Failed to load file %@: %@", path, dataError);
+            
+            if (error != NULL) {
+                NSMutableDictionary *userInfo = [NSMutableDictionary dictionary];
+                userInfo[NSLocalizedDescriptionKey] = [NSString stringWithFormat:@"Failed to load file: %@", path];
+                if (dataError != nil) {
+                    userInfo[NSUnderlyingErrorKey] = dataError;
+                }
+                
+                *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUValidationError userInfo:[userInfo copy]];
+            }
+            
+            return NO;
         }
-        return NO;
     }
+    
+    return [self verifyData:data signatures:signatures fileKind:@"update" fromPath:path verifierInformation:verifierInformation error:error];
+}
 
+- (BOOL)verifyData:(NSData *)data signatures:(SUSignatures *)signatures fileKind:(NSString *)fileKind verifierInformation:(SPUVerifierInformation * _Nullable)verifierInformation error:(NSError * __autoreleasing *)error
+{
+    return [self verifyData:data signatures:signatures fileKind:fileKind fromPath:nil verifierInformation:verifierInformation error:error];
+}
+
+// Note the path must be provided for verifying update archives
+- (BOOL)verifyData:(NSData * _Nullable)data signatures:(SUSignatures *)signatures fileKind:(NSString *)fileKind fromPath:(NSString * _Nullable)path verifierInformation:(SPUVerifierInformation * _Nullable)verifierInformation error:(NSError * __autoreleasing *)error SPU_OBJC_DIRECT
+{
     if (!signatures) {
         if (error != NULL) {
-            *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUValidationError userInfo:@{ NSLocalizedDescriptionKey: @"No signatures given to verifyFileAtPath" }];
+            *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUValidationError userInfo:@{ NSLocalizedDescriptionKey: [NSString stringWithFormat:@"No signatures given to verify data for %@", fileKind] }];
         }
         return NO;
     }
 
-    switch (self.pubKeys.ed25519PubKeyStatus) {
+    switch (_pubKeys.ed25519PubKeyStatus) {
     case SUSigningInputStatusAbsent:
         if (signatures.ed25519SignatureStatus != SUSigningInputStatusAbsent) {
-            SULog(SULogLevelDefault, @"The update has an EdDSA signature, but it won't be used, because the old app doesn't have an EdDSA public key");
+            SULog(SULogLevelDefault, @"The %@ has an EdDSA signature, but it won't be used, because the old app doesn't have an EdDSA public key", fileKind);
         }
         break;
     case SUSigningInputStatusInvalid:
         if (signatures.ed25519SignatureStatus != SUSigningInputStatusAbsent) {
-            NSString *message = @"The update has an EdDSA signature, but the app has an invalid EdDSA public key, so the update will automatically be rejected.";
+            NSString *message = [NSString stringWithFormat:@"The %@ has an EdDSA signature, but the app has an invalid EdDSA public key, so the %@ will automatically be rejected.", fileKind, fileKind];
             SULog(SULogLevelError, @"%@", message);
             
             if (error != NULL) {
@@ -123,12 +146,12 @@
             
             return NO;
         }
-        SULog(SULogLevelDefault, @"The app has an invalid EdDSA public key, but there is no EdDSA signature in the update. Falling back to DSA.");
+        SULog(SULogLevelDefault, @"The app has an invalid EdDSA public key, but there is no EdDSA signature in the %@. Falling back to DSA.", fileKind);
         break;
     case SUSigningInputStatusPresent:
         switch (signatures.ed25519SignatureStatus) {
         case SUSigningInputStatusAbsent: {
-            NSString *message = @"The app has an EdDSA public key, but there is no EdDSA signature in the update, so the update will be rejected.";
+            NSString *message = [NSString stringWithFormat:@"The app has an EdDSA public key, but there is no EdDSA signature in the %@, so the %@ will be rejected.", fileKind, fileKind];
             SULog(SULogLevelError, @"%@", message);
                 
             if (error != NULL) {
@@ -138,7 +161,7 @@
             return NO;
         }
         case SUSigningInputStatusInvalid: {
-            NSString *message = @"The update has an EdDSA signature, but it's invalid, so the update will automatically be rejected.";
+            NSString *message = [NSString stringWithFormat:@"The %@ has an EdDSA signature, but it's invalid, so the %@ will automatically be rejected.", fileKind, fileKind];
             
             SULog(SULogLevelError, @"%@", message);
                 
@@ -148,38 +171,53 @@
             return NO;
         }
         case SUSigningInputStatusPresent: {
-            NSError *dataError = nil;
-            NSData *data = [NSData dataWithContentsOfFile:path options:NSDataReadingMappedAlways error:&dataError];
-            if (!data || !data.length) {
-                SULog(SULogLevelError, @"Failed to load file %@: %@", path, dataError);
-                
-                if (error != NULL) {
-                    NSMutableDictionary *userInfo = [NSMutableDictionary dictionary];
-                    userInfo[NSLocalizedDescriptionKey] = [NSString stringWithFormat:@"Failed to load file: %@", path];
-                    if (dataError != nil) {
-                        userInfo[NSUnderlyingErrorKey] = dataError;
-                    }
-                    
-                    *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUValidationError userInfo:[userInfo copy]];
-                }
-                
-                return NO;
-            }
-            if (ed25519_verify(signatures.ed25519Signature, data.bytes, data.length, self.pubKeys.ed25519PubKey)) {
-                SULog(SULogLevelDefault, @"OK: EdDSA signature is correct");
+            assert(data != nil);
+            if (ed25519_verify(signatures.ed25519Signature, (const unsigned char *)data.bytes, data.length, _pubKeys.ed25519PubKey)) {
+                SULog(SULogLevelDefault, @"OK: EdDSA signature is correct for %@", fileKind);
+#if SPARKLE_BUILD_LEGACY_DSA_SUPPORT
                 // No need to check DSA when EdDSA verification succeeded, unless a DSA signature is provided and it's
                 // erroneously invalid
-                if (signatures.dsaSignatureStatus != SUSigningInputStatusInvalid) {
+                if (signatures.dsaSignatureStatus != SUSigningInputStatusInvalid)
+#endif
+                {
                     return YES;
                 }
             } else {
-                NSString *message = @"EdDSA signature does not match. Data of the update file being checked is different than data that has been signed, or the public key and the private key are not from the same set.";
+                NSMutableString *message = [NSMutableString stringWithFormat:@"EdDSA signature does not match. Data of the %@ being checked is different than data that has been signed, or the public key and the private key are not from the same set.", fileKind];
                 
-                SULog(SULogLevelError, @"%@", message);
+                // Elaborate on the error message if we have more information about the download archive
+                // If there is verifierInformation it must be for a downloaded update (rather than feed or release notes)
+                if (verifierInformation != nil) {
+                    BOOL reportedDiscrepancy = NO;
+                    
+                    NSString *downloadedFileDescription = (path != nil) ? [NSString stringWithFormat:@"%@ (%@)", fileKind, path.lastPathComponent] : fileKind;
+                    
+                    if (verifierInformation.expectedContentLength > 0 && verifierInformation.actualContentLength > 0) {
+                        if (verifierInformation.expectedContentLength != verifierInformation.actualContentLength) {
+                            [message appendFormat:@" The downloaded %@ is likely different than the signed file because the expected content length from the appcast item (%llu bytes) differs from the downloaded file length (%llu bytes).", downloadedFileDescription, verifierInformation.expectedContentLength, verifierInformation.actualContentLength];
+                            reportedDiscrepancy = YES;
+                        }
+                    }
+                    
+                    NSString *actualVersion = verifierInformation.actualVersion;
+                    if (actualVersion != nil && ![verifierInformation.expectedVersion isEqualToString:actualVersion]) {
+                        [message appendFormat:@" The downloaded %@ also has a CFBundleVersion (%@) which differs from the %@ in the appcast item (%@).", downloadedFileDescription, actualVersion, SUAppcastAttributeVersion, verifierInformation.expectedVersion];
+                        reportedDiscrepancy = YES;
+                    }
+                    
+                    if (!reportedDiscrepancy && verifierInformation.expectedContentLength > 0) {
+                        [message appendFormat:@" The downloaded %@ is likely not signed correctly because the file has the expected content length (%llu bytes)%@ which matches the appcast item.", downloadedFileDescription, verifierInformation.actualContentLength, (actualVersion == nil ? @"" : [NSString stringWithFormat:@" and CFBundleVersion (%@)", actualVersion])];
+                    }
+                }
                 
-                if (signatures.dsaSignatureStatus != SUSigningInputStatusAbsent) {
+                SULog(SULogLevelError, @"%@", [message copy]);
+                
+#if SPARKLE_BUILD_LEGACY_DSA_SUPPORT
+                // Legacy DSA verification is only applicable if archive file path is provided
+                if (signatures.dsaSignatureStatus != SUSigningInputStatusAbsent && path != nil) {
                     SULog(SULogLevelDefault, @"DSA signature won't be checked, because EdDSA verification has already failed");
                 }
+#endif
                 
                 if (error != NULL) {
                     *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUValidationError userInfo:@{ NSLocalizedDescriptionKey: message }];
@@ -192,14 +230,16 @@
         break;
     }
 
-    switch (self.pubKeys.dsaPubKeyStatus) {
+#if SPARKLE_BUILD_LEGACY_DSA_SUPPORT
+    // Legacy DSA verification is only for downloaded updates
+    switch (_pubKeys.dsaPubKeyStatus) {
     case SUSigningInputStatusAbsent:
-        if (signatures.dsaSignatureStatus != SUSigningInputStatusAbsent) {
+        if (signatures.dsaSignatureStatus != SUSigningInputStatusAbsent && path != nil) {
             SULog(SULogLevelDefault, @"The update has a DSA signature, but it can't be used, because the old app doesn't have a DSA public key");
         }
         break;
     case SUSigningInputStatusInvalid:
-        if (signatures.dsaSignatureStatus != SUSigningInputStatusAbsent) {
+        if (signatures.dsaSignatureStatus != SUSigningInputStatusAbsent && path != nil) {
             // We will have already logged an error for this failure when the public key was read in, so just do an informational log here.
             NSString *message = @"The update has a DSA signature, but the app has an invalid DSA public key, so the update will automatically be rejected.";
             
@@ -230,21 +270,37 @@
             return NO;
         }
         case SUSigningInputStatusPresent: {
-            NSInputStream *dataInputStream = [NSInputStream inputStreamWithFileAtPath:path];
+            NSInputStream *dataInputStream = (path != nil) ? [NSInputStream inputStreamWithFileAtPath:(NSString * _Nonnull)path] : nil;
             return [self verifyDSASignatureOfStream:dataInputStream dsaSignature:signatures.dsaSignature error:error];
         }
         }
     }
+#else
+    switch (_pubKeys.dsaPubKeyStatus) {
+        case SUSigningInputStatusAbsent:
+            break;
+        case SUSigningInputStatusInvalid:
+            // We don't keep track of DSA signatures, so we will ignore this mistake and treat it as if it were absent
+            break;
+        case SUSigningInputStatusPresent:
+            if (error != NULL) {
+                *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUValidationError userInfo:@{ NSLocalizedDescriptionKey: @"The old app has a DSA public key but DSA support is disabled, and the old app does not have an EdDSA public key." }];
+            }
+            
+            return NO;
+    }
+#endif
 
     if (error != NULL) {
         // Use generic failure
-        *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUValidationError userInfo:@{ NSLocalizedDescriptionKey: @"EdDSA and DSA verification for the update has failed" }];
+        *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUValidationError userInfo:@{ NSLocalizedDescriptionKey: [NSString stringWithFormat:@"EdDSA and DSA verification for the %@ has failed", fileKind] }];
     }
     
     return NO;
 }
 
-- (BOOL)verifyDSASignatureOfStream:(NSInputStream *)stream dsaSignature:(NSData *)dsaSignature error:(NSError * __autoreleasing *)outError
+#if SPARKLE_BUILD_LEGACY_DSA_SUPPORT
+- (BOOL)verifyDSASignatureOfStream:(NSInputStream *)stream dsaSignature:(NSData *)dsaSignature error:(NSError * __autoreleasing *)outError SPU_OBJC_DIRECT
 {
     if (!stream || !dsaSignature) {
         SULog(SULogLevelError, @"Invalid arguments to verifyStream");
@@ -265,6 +321,9 @@
         return NO;
     }
 
+    // Sparkle's DSA support is deprecated
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
     __block SecGroupTransformRef group = SecTransformCreateGroupTransform();
     __block SecTransformRef dataReadTransform = NULL;
     __block SecTransformRef dataDigestTransform = NULL;
@@ -297,11 +356,8 @@
         
         return cleanup();
     }
-
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdirect-ivar-access"
+    
     dataVerifyTransform = SecVerifyTransformCreate(dsaPubKeySecKey, (__bridge CFDataRef)dsaSignature, &error);
-#pragma clang diagnostic pop
     if (!dataVerifyTransform) {
         SULog(SULogLevelError, @"Could not understand format of the signature: %@; Signature data: %@", error, dsaSignature);
         if (outError != NULL) {
@@ -317,8 +373,12 @@
         
         return cleanup();
     }
+#pragma clang diagnostic pop
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
     SecTransformConnectTransforms(dataReadTransform, kSecTransformOutputAttributeName, dataDigestTransform, kSecTransformInputAttributeName, group, &error);
+#pragma clang diagnostic pop
     if (error) {
         if (outError != NULL) {
             *outError = [NSError errorWithDomain:SUSparkleErrorDomain code:SUValidationError userInfo:@{NSLocalizedDescriptionKey : @"Failed to connect data read transform", NSUnderlyingErrorKey: (__bridge NSError *)error}];
@@ -327,7 +387,10 @@
         return cleanup();
     }
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
     SecTransformConnectTransforms(dataDigestTransform, kSecTransformOutputAttributeName, dataVerifyTransform, kSecTransformInputAttributeName, group, &error);
+#pragma clang diagnostic pop
     if (error) {
         if (outError != NULL) {
             *outError = [NSError errorWithDomain:SUSparkleErrorDomain code:SUValidationError userInfo:@{NSLocalizedDescriptionKey : @"Failed to connect data digest transform", NSUnderlyingErrorKey: (__bridge NSError *)error}];
@@ -336,7 +399,10 @@
         return cleanup();
     }
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
     NSNumber *result = CFBridgingRelease(SecTransformExecute(group, &error));
+#pragma clang diagnostic pop
     if (error) {
         SULog(SULogLevelError, @"DSA signature verification failed: %@", error);
         if (outError != NULL) {
@@ -355,5 +421,6 @@
     cleanup();
     return result.boolValue;
 }
+#endif
 
 @end

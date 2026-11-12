@@ -18,15 +18,33 @@
 #import <Foundation/Foundation.h>
 @class SUSignatures;
 @class SUPublicKeys;
+@class SPUVerifierInformation;
 
-@interface SUSignatureVerifier : NSObject
+NS_ASSUME_NONNULL_BEGIN
 
-+ (BOOL)validatePath:(NSString *)path withSignatures:(SUSignatures *)signatures withPublicKeys:(SUPublicKeys *)pkeys error:(NSError * __autoreleasing *)error;
+#ifndef BUILDING_SPARKLE_TESTS
+#define SUSignatureVerifierDefinitionAttribute SPU_OBJC_DIRECT_MEMBERS
+#else
+#define SUSignatureVerifierDefinitionAttribute __attribute__((objc_runtime_name("SUTestSignatureVerifier")))
+#endif
+
+SUSignatureVerifierDefinitionAttribute @interface SUSignatureVerifier : NSObject
+
+// Helper for verifying downloaded updates
++ (BOOL)validatePath:(NSString *)path withSignatures:(SUSignatures *)signatures withPublicKeys:(SUPublicKeys *)pkeys verifierInformation:(SPUVerifierInformation * _Nullable)verifierInformation error:(NSError * __autoreleasing *)error;
+
+- (instancetype)init NS_UNAVAILABLE;
 
 - (instancetype)initWithPublicKeys:(SUPublicKeys *)pkeys;
 
-- (BOOL)verifyFileAtPath:(NSString *)path signatures:(SUSignatures *)signatures error:(NSError * __autoreleasing *)error;
+// Used for verifying downloaded updates
+- (BOOL)verifyFileAtPath:(NSString *)path signatures:(SUSignatures *)signatures verifierInformation:(SPUVerifierInformation * _Nullable)verifierInformation error:(NSError * __autoreleasing *)error;
+
+// Used for verifying non-update data (like release notes)
+- (BOOL)verifyData:(NSData *)data signatures:(SUSignatures *)signatures fileKind:(NSString *)fileKind verifierInformation:(SPUVerifierInformation * _Nullable)verifierInformation error:(NSError * __autoreleasing *)error;
 
 @end
+
+NS_ASSUME_NONNULL_END
 
 #endif

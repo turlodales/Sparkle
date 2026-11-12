@@ -11,23 +11,22 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+#ifndef BUILDING_SPARKLE_TESTS
+#define SUFileManagerDefinitionAttribute SPU_OBJC_DIRECT_MEMBERS
+#else
+#define SUFileManagerDefinitionAttribute __attribute__((objc_runtime_name("SUTestFileManager")))
+#endif
+
 /**
  * A class used for performing file operations more suitable than NSFileManager for performing installation work.
  * All operations on this class may be used on thread other than the main thread.
  * This class provides just basic file operations and stays away from including much application-level logic.
  */
+SUFileManagerDefinitionAttribute
 @interface SUFileManager : NSObject
 
 /**
- * Initializes a new file manager
- *
- * @return A new file manager instance
- */
-- (instancetype)init;
-
-/**
  * Creates a temporary directory on the same volume as a provided URL
- * @param preferredName A name that may be used when creating the temporary directory. Note that in the uncothirdStageErrormmon case this name is used, the temporary directory will be created inside the directory pointed by appropriateURL
  * @param appropriateURL A URL to a directory that resides on the volume that the temporary directory will be created on. In the uncommon case, the temporary directory may be created inside this directory.
  * @param error If an error occurs, upon returns contains an NSError object that describes the problem. If you are not interested in possible errors, you may pass in NULL.
  * @return A URL pointing to the newly created temporary directory, or nil with a populated error object if an error occurs.
@@ -35,7 +34,7 @@ NS_ASSUME_NONNULL_BEGIN
  * When moving an item from a source to a destination, it is desirable to create a temporary intermediate destination on the same volume as the destination to ensure
  * that the item will be moved, and not copied, from the intermediate point to the final destination. This ensures file atomicity.
  */
-- (NSURL * _Nullable)makeTemporaryDirectoryWithPreferredName:(NSString *)preferredName appropriateForDirectoryURL:(NSURL *)appropriateURL error:(NSError * __autoreleasing *)error;
+- (NSURL * _Nullable)makeTemporaryDirectoryAppropriateForDirectoryURL:(NSURL *)appropriateURL error:(NSError * __autoreleasing *)error;
 
 /**
  * Creates a directory at the target URL
@@ -60,7 +59,31 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)moveItemAtURL:(NSURL *)sourceURL toURL:(NSURL *)destinationURL error:(NSError **)error;
 
 /**
- * Replaces an original item with a new item atomically.
+ * Renames an item from a source to a destination assuming source and destination URLs have symbolic links resolved.
+ * @param sourceURL A URL pointing to the item to rename. The item at this URL must exist.
+ * @param destinationURL A URL pointing to the destination the item will be moved at.
+ * @param error if an error occurs, upon returns contains an NSError object that describes the problem. If you are not interested in possible errors, you may pass in NULL.
+ * @return YES if the time was renamed successfully, otherwise NO along with a pouplated error object.
+ *
+ * sourceURL and destinationURL must reside on the same volume otherwise this operation will fail.
+ * If any symbolic links are encountered in these paths during path resolution, this operation will fail.
+ */
+- (BOOL)renameItemAtResolvedSymlinkURL:(NSURL *)sourceURL toResolvedSymlinkURL:(NSURL *)destinationURL error:(NSError *__autoreleasing *)error;
+
+/**
+ * Returns a URL by resolving links in path.
+ * @param url A URL pointing to a real file to resolve symlinks in path.
+ * @param isDirectory Indicates if the URL is a directory.
+ * @param error if an error occurs, upon returns contains an NSError object that describes the problem. If you are not interested in possible errors, you may pass in NULL.
+ * @return A URL that is resolved and has no symlinks in its path.
+ *
+ * This method is suitable to resolving a URL before passing it to -renameItemAtResolvedSymlinkURL:toResolvedSymlinkURL:error:
+ * -[NSURL URLByResolvingSymlinksInPath] does not resolve symlinks for file paths starting with /private/ hence the need for this method.
+ */
+- (NSURL * _Nullable)resolveSymlinksInURL:(NSURL *)url isDirectory:(BOOL)isDirectory error:(NSError * __autoreleasing *)error;
+
+/**
+ * Swaps an original item with a new item atomically.
  * @param originalItemURL A URL pointing to the original item to replace. The item at this URL must exist.
  * @param newItemURL A URL pointing to the new item that will replace the original item.
  * @param error If an error occurs, upon returns contains an NSError object that describes the problem. If you are not interested in possible errors, you may pass in NULL.
@@ -70,7 +93,17 @@ NS_ASSUME_NONNULL_BEGIN
  * Otherwise on failure you may need to re-try using move operations. This operation will fail on non-apfs volumes or volumes that don't support rename swapping.
  * Both originalItemURL and newItemURL must exist.
  */
-- (BOOL)replaceItemAtURL:(NSURL *)originalItemURL withItemAtURL:(NSURL *)newItemURL error:(NSError **)error __OSX_AVAILABLE(10.13);
+- (BOOL)swapItemAtURL:(NSURL *)originalItemURL withItemAtURL:(NSURL *)newItemURL error:(NSError **)error;
+
+/**
+ * Checks if two URLs are on the same volume.
+ * @param url1 A URL pointing to the first item
+ * @param url2 A URL pointing to the second item
+ * @return YES if both URLs are on the same volume, otherwise NO
+ *
+ * If any volume retrieval error occurs during the process, this method assumes both items are on the same volume (which is the common case).
+ */
+- (BOOL)itemAtURL:(NSURL *)url1 isOnSameVolumeItemAsURL:(NSURL *)url2;
 
 /**
  * Copies an item from a source to a destination
@@ -108,6 +141,18 @@ NS_ASSUME_NONNULL_BEGIN
  * This is not an atomic operation.
  */
 - (BOOL)changeOwnerAndGroupOfItemAtRootURL:(NSURL *)targetURL toMatchURL:(NSURL *)matchURL error:(NSError **)error;
+
+/**
+ Changes the owner and group ID of an item at a specified target URL
+ @param targetURL A URL pointing to the target item whose owner and group IDs to alter. The item at this URL must exist.
+ @param ownerID The new owner ID to set on the item.
+ @param groupID The new group ID to set on the item.
+ @param error If an error occurs, upon returns contains an NSError object that describes the problem. If you are not interested in possible errors, you may pass in NULL.
+ @return YES if the target item's owner and group IDs have changed, otherwise NO along with a populated error object.
+ 
+ Unlike -changeOwnerAndGroupOfItemAtRootURL:toMatchURL:error: this method does not recursively try to change the owner and group IDs if the target item is a directory.
+ */
+- (BOOL)changeOwnerAndGroupOfItemAtURL:(NSURL *)targetURL ownerID:(uid_t)ownerID groupID:(gid_t)groupID error:(NSError * __autoreleasing *)error;
 
 /**
  * Updates the modification and access time of an item at a specified target URL to the current time

@@ -25,64 +25,48 @@
 #import "SUXPCInstallerConnection.h"
 #import "SPUDownloadedUpdate.h"
 #import "SPUInstallationType.h"
+#import "SUConstants.h"
+#import "SPUProbeInstallStatus.h"
 
 
 #include "AppKitPrevention.h"
 
 #define FIRST_INSTALLER_MESSAGE_TIMEOUT 7ull
 
+#if SPARKLE_BUILD_LEGACY_SUUPDATER
 @interface NSObject (PrivateDelegateMethods)
 
 - (nullable NSString *)_pathToRelaunchForUpdater:(SPUUpdater *)updater;
 
 @end
+#endif
 
 @interface SPUInstallerDriver () <SUInstallerCommunicationProtocol>
-
-@property (nonatomic, readonly) SUHost *host;
-@property (nonatomic, readonly) NSBundle *applicationBundle;
-@property (nonatomic, weak, readonly) id<SPUInstallerDriverDelegate> delegate;
-@property (nonatomic) SPUInstallerMessageType currentStage;
-@property (nonatomic) BOOL startedInstalling;
-
-@property (nonatomic) id<SUInstallerConnectionProtocol> installerConnection;
-
-@property (nonatomic) NSUInteger extractionAttempts;
-@property (nonatomic) BOOL postponedOnce;
-@property (nonatomic, weak, readonly) id updater;
-@property (nonatomic, weak, readonly) id<SPUUpdaterDelegate> updaterDelegate;
-@property (nonatomic) BOOL relaunch;
-
-@property (nonatomic) BOOL systemDomain;
-
-@property (nonatomic) SUAppcastItem *updateItem;
-@property (nonatomic, copy) NSString *downloadName;
-@property (nonatomic, copy) NSString *temporaryDirectory;
-
-@property (nonatomic) BOOL aborted;
-@property (nonatomic, nullable) NSError *installerError;
-
 @end
 
 @implementation SPUInstallerDriver
-
-@synthesize host = _host;
-@synthesize applicationBundle = _applicationBundle;
-@synthesize delegate = _delegate;
-@synthesize currentStage = _currentStage;
-@synthesize startedInstalling = _startedInstalling;
-@synthesize installerConnection = _installerConnection;
-@synthesize extractionAttempts = _extractionAttempts;
-@synthesize postponedOnce = _postponedOnce;
-@synthesize updater = _updater;
-@synthesize updaterDelegate = _updaterDelegate;
-@synthesize relaunch = _relaunch;
-@synthesize systemDomain = _systemDomain;
-@synthesize updateItem = _updateItem;
-@synthesize downloadName = _downloadName;
-@synthesize temporaryDirectory = _temporaryDirectory;
-@synthesize aborted = _aborted;
-@synthesize installerError = _installerError;
+{
+    SUHost *_host;
+    NSBundle *_applicationBundle;
+    id<SUInstallerConnectionProtocol> _installerConnection;
+    SUAppcastItem *_updateItem;
+    NSData *_updateURLBookmarkData;
+    NSError *_installerError;
+    
+    __weak id _updater;
+    __weak id<SPUUpdaterDelegate> _updaterDelegate;
+    __weak id<SPUInstallerDriverDelegate> _delegate;
+    
+    void (^_updateWillInstallHandler)(void);
+    
+    SPUInstallerMessageType _currentStage;
+    NSUInteger _extractionAttempts;
+    
+    BOOL _relaunch;
+    BOOL _systemDomain;
+    BOOL _aborted;
+    BOOL _notifiedDelegateInstallationWillFinish;
+}
 
 - (instancetype)initWithHost:(SUHost *)host applicationBundle:(NSBundle *)applicationBundle updater:(id)updater updaterDelegate:(id<SPUUpdaterDelegate>)updaterDelegate delegate:(nullable id<SPUInstallerDriverDelegate>)delegate
 {
@@ -97,59 +81,136 @@
     return self;
 }
 
-- (void)setUpConnection
+- (void)setUpdateWillInstallHandler:(void (^)(void))updateWillInstallHandler
 {
-    if (self.installerConnection != nil) {
+    _updateWillInstallHandler = [updateWillInstallHandler copy];
+}
+
+- (void)_reportInstallerError:(nullable NSError *)currentInstallerError genericErrorCode:(NSInteger)genericErrorCode genericUserInfo:(NSDictionary *)genericUserInfo SPU_OBJC_DIRECT
+{
+    // First see if there is a good custom error we can show
+    // We only check for signing validation errors and installation errors due to not having write permission currently
+    NSError *customError = nil;
+    if (currentInstallerError != nil) {
+        NSError *underlyingError = currentInstallerError.userInfo[NSUnderlyingErrorKey];
+        if (underlyingError != nil) {
+            if (underlyingError.code == SUValidationError) {
+                NSDictionary *userInfo = @{
+                    NSLocalizedDescriptionKey: SULocalizedStringFromTableInBundle(@"The update is improperly signed and could not be validated. Please try again later or contact the app developer.", SPARKLE_TABLE, SUSparkleBundle(), nil),
+                    NSUnderlyingErrorKey: (NSError * _Nonnull)currentInstallerError
+                };
+                
+                customError = [NSError errorWithDomain:SUSparkleErrorDomain code:SUInstallationError userInfo:userInfo];
+            } else if (underlyingError.code == SUInstallationError) {
+                NSError *secondUnderlyingError = underlyingError.userInfo[NSUnderlyingErrorKey];
+                if (secondUnderlyingError != nil && [secondUnderlyingError.domain isEqualToString:NSCocoaErrorDomain] && secondUnderlyingError.code == NSFileWriteNoPermissionError) {
+                    // Note: these error strings will only surface for external app updaters like sparkle-cli (i.e, updaters that update other app bundles)
+                    
+#if SPARKLE_COPY_LOCALIZATIONS
+                    NSBundle *sparkleBundle = SUSparkleBundle();
+#endif
+                    
+                    NSMutableDictionary *userInfo = [NSMutableDictionary dictionaryWithDictionary:@{
+                        NSLocalizedDescriptionKey: SULocalizedStringFromTableInBundle(@"The installation failed due to not having permission to write the new update.", SPARKLE_TABLE, sparkleBundle, nil),
+                        NSUnderlyingErrorKey: (NSError * _Nonnull)currentInstallerError
+                    }];
+                    
+                    // macOS 13 and later introduce a policy where Gatekeeper can block app modifications if the apps have different Team IDs
+                    if (@available(macOS 13, *)) {
+                        NSBundle *mainBundle = [NSBundle mainBundle];
+                        if (![mainBundle isEqual:_host.bundle]) {
+                            SUHost *mainBundleHost = [[SUHost alloc] initWithBundle:mainBundle];
+                            
+                            userInfo[NSLocalizedRecoverySuggestionErrorKey] = [NSString stringWithFormat:SULocalizedStringFromTableInBundle(@"You may need to allow modifications from %1$@ in System Settings under Privacy & Security and App Management to install future updates.", SPARKLE_TABLE, sparkleBundle, nil), mainBundleHost.name];
+                        }
+                    }
+                    
+                    customError = [NSError errorWithDomain:SUSparkleErrorDomain code:SUInstallationWriteNoPermissionError userInfo:userInfo];
+                }
+            }
+        }
+    }
+    
+    // Otherwise if there's no custom error, then use a generic installer error to show
+    // and keep the underlying error around for logging
+    NSError *installerError;
+    if (customError != nil) {
+        installerError = customError;
+    } else {
+        NSMutableDictionary *userInfo = [NSMutableDictionary dictionaryWithDictionary:genericUserInfo];
+        if (currentInstallerError != nil) {
+            userInfo[NSUnderlyingErrorKey] = currentInstallerError;
+        }
+        installerError = [NSError errorWithDomain:SUSparkleErrorDomain code:genericErrorCode userInfo:userInfo];
+    }
+    
+    [_delegate installerIsRequestingAbortInstallWithError:installerError];
+}
+
+- (void)setUpConnection SPU_OBJC_DIRECT
+{
+    if (_installerConnection != nil) {
         return;
     }
     
-    NSString *hostBundleIdentifier = self.host.bundle.bundleIdentifier;
+    NSString *hostBundleIdentifier = _host.bundle.bundleIdentifier;
     assert(hostBundleIdentifier != nil);
     
-    if (!SPUXPCServiceExists(@INSTALLER_CONNECTION_BUNDLE_ID)) {
-        self.installerConnection = [[SUInstallerConnection alloc] initWithDelegate:self];
-    } else {
-        self.installerConnection = [[SUXPCInstallerConnection alloc] initWithDelegate:self];
+    BOOL usingInstallerService;
+#if INSTALLER_CONNECTION_XPC_SERVICE_EMBEDDED
+    if (SPUXPCServiceIsEnabled(SUEnableInstallerConnectionServiceKey)) {
+        _installerConnection = [[SUXPCInstallerConnection alloc] initWithDelegate:self];
+        usingInstallerService = YES;
+    } else
+#endif
+    {
+        _installerConnection = [[SUInstallerConnection alloc] initWithDelegate:self remote:NO];
+        usingInstallerService = NO;
     }
     
-    __weak SPUInstallerDriver *weakSelf = self;
-    [self.installerConnection setInvalidationHandler:^{
+    __weak __typeof__(self) weakSelf = self;
+    [_installerConnection setInvalidationHandler:^{
         dispatch_async(dispatch_get_main_queue(), ^{
-            SPUInstallerDriver *strongSelf = weakSelf;
-            if (strongSelf.installerConnection != nil && !strongSelf.aborted) {
+            __typeof__(self) strongSelf = weakSelf;
+            if (strongSelf != nil && strongSelf->_installerConnection != nil && !strongSelf->_aborted) {
+                NSString *impactedTools = usingInstallerService ? (@SPARKLE_RELAUNCH_TOOL_NAME" and "@INSTALLER_LAUNCHER_NAME) : @SPARKLE_RELAUNCH_TOOL_NAME;
                 
-                NSMutableDictionary *userInfo = [NSMutableDictionary dictionaryWithDictionary:@{
-                    NSLocalizedDescriptionKey: SULocalizedString(@"An error occurred while running the updater. Please try again later.", nil),
-                    NSLocalizedFailureReasonErrorKey:@"The remote port connection was invalidated from the updater. For additional details, please check Console logs for "@SPARKLE_RELAUNCH_TOOL_NAME". If your application is sandboxed, please also ensure Installer Connection & Status entitlements are correctly set up: https://sparkle-project.org/documentation/sandboxing/"
-                }];
-                
-                NSError *installerError = strongSelf.installerError;
-                if (installerError != nil) {
-                    userInfo[NSUnderlyingErrorKey] = installerError;
+                NSString *additionalFailureReason;
+                {
+                    NSString *executableFailureReason;
+                    if (!SPUHelperHasExecutablePermission(@SPARKLE_RELAUNCH_TOOL_NAME, &executableFailureReason) || !SPUHelperHasExecutablePermission(@SPARKLE_INSTALLER_PROGRESS_TOOL_NAME@".app/Contents/MacOS/"@SPARKLE_INSTALLER_PROGRESS_TOOL_NAME, &executableFailureReason)) {
+                        additionalFailureReason = executableFailureReason;
+                    } else {
+                        additionalFailureReason = [NSString stringWithFormat:@"If your application is sandboxed, please ensure Installer Connection & Status entitlements are correctly set up: https://sparkle-project.org/documentation/sandboxing/ . Otherwise if %@ %@ not adhoc signed, your app must be signed with a matching team ID", impactedTools, (usingInstallerService ? @"are" : @"is")];
+                    }
                 }
                 
-                [strongSelf.delegate installerIsRequestingAbortInstallWithError:[NSError errorWithDomain:SUSparkleErrorDomain code:SUInstallationError userInfo:userInfo]];
+                NSDictionary *genericUserInfo = @{
+                    NSLocalizedDescriptionKey: SULocalizedStringFromTableInBundle(@"An error occurred while running the updater. Please try again later.", SPARKLE_TABLE, SUSparkleBundle(), nil),
+                    NSLocalizedFailureReasonErrorKey:[NSString stringWithFormat:@"The remote port connection was invalidated from the updater. %@. For additional details, check Console logs for %@", additionalFailureReason, impactedTools]
+                };
+                
+                [strongSelf _reportInstallerError:strongSelf->_installerError genericErrorCode:SUInstallationError genericUserInfo:genericUserInfo];
             }
         });
     }];
     
     NSString *serviceName = SPUInstallerServiceNameForBundleIdentifier(hostBundleIdentifier);
-    NSString *installationType = self.updateItem.installationType;
+    NSString *installationType = _updateItem.installationType;
     assert(installationType != nil);
     
-    [self.installerConnection setServiceName:serviceName systemDomain:self.systemDomain];
+    [_installerConnection setServiceName:serviceName systemDomain:_systemDomain];
 }
 
 // This can be called multiple times (eg: if a delta update fails, this may be called again with a regular update item)
 - (void)extractDownloadedUpdate:(SPUDownloadedUpdate *)downloadedUpdate silently:(BOOL)silently completion:(void (^)(NSError * _Nullable))completionHandler
 {
-    self.updateItem = downloadedUpdate.updateItem;
-    self.temporaryDirectory = downloadedUpdate.temporaryDirectory;
-    self.downloadName = downloadedUpdate.downloadName;
+    _updateItem = downloadedUpdate.updateItem;
+    _updateURLBookmarkData = downloadedUpdate.downloadBookmarkData;
     
-    self.currentStage = SPUInstallerNotStarted;
+    _currentStage = SPUInstallerNotStarted;
     
-    if (self.installerConnection == nil) {
+    if (_installerConnection == nil) {
         [self launchAutoUpdateSilently:silently completion:completionHandler];
     } else {
         // The Install tool is already alive; just send out installation input data again
@@ -160,49 +221,57 @@
 
 - (void)resumeInstallingUpdateWithUpdateItem:(SUAppcastItem *)updateItem systemDomain:(BOOL)systemDomain
 {
-    self.updateItem = updateItem;
-    self.systemDomain = systemDomain;
+    _updateItem = updateItem;
+    _systemDomain = systemDomain;
 }
 
-- (void)sendInstallationData
+- (void)sendInstallationData SPU_OBJC_DIRECT
 {
-    NSString *pathToRelaunch = self.applicationBundle.bundlePath;
+    NSString *pathToRelaunch = _applicationBundle.bundlePath;
+    
+    id<SPUUpdaterDelegate> updaterDelegate = _updaterDelegate;
+    id updater = _updater;
+    
+#if SPARKLE_BUILD_LEGACY_SUUPDATER
     // Give the delegate one more chance for determining the path to relaunch via a private API used by SUUpdater
-    if ([self.updaterDelegate respondsToSelector:@selector(_pathToRelaunchForUpdater:)]) {
-        NSString *relaunchPath = [(NSObject *)self.updaterDelegate _pathToRelaunchForUpdater:self.updater];
+    if (updater != nil && [updaterDelegate respondsToSelector:@selector(_pathToRelaunchForUpdater:)]) {
+        NSString *relaunchPath = [(NSObject *)updaterDelegate _pathToRelaunchForUpdater:updater];
         if (relaunchPath != nil) {
             pathToRelaunch = relaunchPath;
         }
     }
+#endif
 
     NSString *decryptionPassword = nil;
-    if ([self.updaterDelegate respondsToSelector:@selector(decryptionPasswordForUpdater:)]) {
-        decryptionPassword = [self.updaterDelegate decryptionPasswordForUpdater:self.updater];
+    if (updater != nil && [updaterDelegate respondsToSelector:@selector(decryptionPasswordForUpdater:)]) {
+        decryptionPassword = [updaterDelegate decryptionPasswordForUpdater:updater];
     }
     
-    SPUInstallationInputData *installationData = [[SPUInstallationInputData alloc] initWithRelaunchPath:pathToRelaunch hostBundlePath:self.host.bundlePath updateDirectoryPath:self.temporaryDirectory downloadName:self.downloadName installationType:self.updateItem.installationType signatures:self.updateItem.signatures decryptionPassword:decryptionPassword];
+    id<SPUInstallerDriverDelegate> delegate = _delegate;
+    
+    SPUInstallationInputData *installationData = [[SPUInstallationInputData alloc] initWithRelaunchPath:pathToRelaunch hostBundlePath:_host.bundlePath updateURLBookmarkData:_updateURLBookmarkData installationType:_updateItem.installationType signatures:_updateItem.signatures decryptionPassword:decryptionPassword expectedVersion:_updateItem.versionString expectedContentLength:_updateItem.contentLength];
     
     NSData *archivedData = SPUArchiveRootObjectSecurely(installationData);
     if (archivedData == nil) {
-        [self.delegate installerIsRequestingAbortInstallWithError:[NSError errorWithDomain:SUSparkleErrorDomain code:SUInstallationError userInfo:@{ NSLocalizedDescriptionKey:@"An error occurred while encoding the installer parameters. Please try again later." }]];
+        [delegate installerIsRequestingAbortInstallWithError:[NSError errorWithDomain:SUSparkleErrorDomain code:SUInstallationError userInfo:@{ NSLocalizedDescriptionKey:@"An error occurred while encoding the installer parameters. Please try again later." }]];
         return;
     }
     
-    [self.installerConnection handleMessageWithIdentifier:SPUInstallationData data:archivedData];
+    [_installerConnection handleMessageWithIdentifier:SPUInstallationData data:archivedData];
     
-    self.currentStage = SPUInstallerNotStarted;
+    _currentStage = SPUInstallerNotStarted;
     
     // If the number of extractions attempts stays the same, then we've waited too long and should abort the installation
     // The extraction attempts is incremented when we receive an extraction should start message from the installer
     // This also handles the case when a delta extraction fails and tries to re-try another extraction attempt later
     // We will also want to make sure current stage is still SUInstallerNotStarted because it may not be due to resumability
-    NSUInteger currentExtractionAttempts = self.extractionAttempts;
-    __weak SPUInstallerDriver *weakSelf = self;
+    NSUInteger currentExtractionAttempts = _extractionAttempts;
+    __weak __typeof__(self) weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(FIRST_INSTALLER_MESSAGE_TIMEOUT * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        SPUInstallerDriver *strongSelf = weakSelf;
-        if (strongSelf != nil && strongSelf.currentStage == SPUInstallerNotStarted && currentExtractionAttempts == self.extractionAttempts) {
+        __typeof__(self) strongSelf = weakSelf;
+        if (strongSelf != nil && strongSelf->_currentStage == SPUInstallerNotStarted && currentExtractionAttempts == strongSelf->_extractionAttempts) {
             SULog(SULogLevelError, @"Timeout: Installer never started archive extraction");
-            [strongSelf.delegate installerIsRequestingAbortInstallWithError:[NSError errorWithDomain:SUSparkleErrorDomain code:SUInstallationError userInfo:@{ NSLocalizedDescriptionKey:SULocalizedString(@"An error occurred while starting the installer. Please try again later.", nil) }]];
+            [strongSelf->_delegate installerIsRequestingAbortInstallWithError:[NSError errorWithDomain:SUSparkleErrorDomain code:SUInstallationError userInfo:@{ NSLocalizedDescriptionKey:SULocalizedStringFromTableInBundle(@"An error occurred while starting the installer. Please try again later.", SPARKLE_TABLE, SUSparkleBundle(), nil) }]];
         }
     });
 }
@@ -214,77 +283,52 @@
     });
 }
 
-- (void)_handleMessageWithIdentifier:(int32_t)identifier data:(NSData *)data
+- (void)_handleMessageWithIdentifier:(int32_t)identifier data:(NSData *)data SPU_OBJC_DIRECT
 {
-    if (!SPUInstallerMessageTypeIsLegal(self.currentStage, identifier)) {
-        SULog(SULogLevelError, @"Error: received out of order message with current stage: %d, requested stage: %d", self.currentStage, identifier);
+    if (!SPUInstallerMessageTypeIsLegal(_currentStage, (SPUInstallerMessageType)identifier)) {
+        SULog(SULogLevelError, @"Error: received out of order message with current stage: %d, requested stage: %d", _currentStage, identifier);
         return;
     }
     
+    id<SPUInstallerDriverDelegate> delegate = _delegate;
+    
     if (identifier == SPUExtractionStarted) {
-        self.extractionAttempts++;
-        self.currentStage = identifier;
-        [self.delegate installerDidStartExtracting];
+        _extractionAttempts++;
+        _currentStage = (SPUInstallerMessageType)identifier;
+        [delegate installerDidStartExtracting];
     } else if (identifier == SPUExtractedArchiveWithProgress) {
         if (data.length == sizeof(double) && sizeof(double) == sizeof(uint64_t)) {
             uint64_t progressValue = CFSwapInt64LittleToHost(*(const uint64_t *)data.bytes);
             double progress = *(double *)&progressValue;
-            [self.delegate installerDidExtractUpdateWithProgress:progress];
-            self.currentStage = identifier;
+            [delegate installerDidExtractUpdateWithProgress:progress];
+            _currentStage = (SPUInstallerMessageType)identifier;
         }
     } else if (identifier == SPUArchiveExtractionFailed) {
         // If this is a delta update, there must be a regular update we can fall back to
-        if ([self.updateItem isDeltaUpdate]) {
-            [self.delegate installerDidFailToApplyDeltaUpdate];
+        if ([_updateItem isDeltaUpdate]) {
+            [delegate installerDidFailToApplyDeltaUpdate];
         } else {
             // Don't have to store current stage because we're going to abort
-            NSMutableDictionary *userInfo = [NSMutableDictionary dictionaryWithDictionary:@{ NSLocalizedDescriptionKey:SULocalizedString(@"An error occurred while extracting the archive. Please try again later.", nil) }];
+            NSDictionary *genericUserInfo = @{ NSLocalizedDescriptionKey:SULocalizedStringFromTableInBundle(@"An error occurred while extracting the archive. Please try again later.", SPARKLE_TABLE, SUSparkleBundle(), nil) };
             
             NSError *unarchivedError = (NSError *)SPUUnarchiveRootObjectSecurely(data, [NSError class]);
-            if (unarchivedError != nil) {
-                userInfo[NSUnderlyingErrorKey] = unarchivedError;
-            }
-            
-            [self.delegate installerIsRequestingAbortInstallWithError:[NSError errorWithDomain:SUSparkleErrorDomain code:SUUnarchivingError userInfo:userInfo]];
+            [self _reportInstallerError:unarchivedError genericErrorCode:SUUnarchivingError genericUserInfo:genericUserInfo];
         }
     } else if (identifier == SPUValidationStarted) {
-        self.currentStage = identifier;
+        _currentStage = (SPUInstallerMessageType)identifier;
     } else if (identifier == SPUInstallationStartedStage1) {
-        self.currentStage = identifier;
-        [self.delegate installerDidStartInstalling];
-        self.startedInstalling = YES;
-        
+        _currentStage = (SPUInstallerMessageType)identifier;
     } else if (identifier == SPUInstallationFinishedStage1) {
-        self.currentStage = identifier;
+        _currentStage = (SPUInstallerMessageType)identifier;
         
         // Let the installer keep a copy of the appcast item data
         // We may want to ask for it later (note the updater can relaunch without the app necessarily having relaunched)
-        NSData *updateItemData = SPUArchiveRootObjectSecurely(self.updateItem);
+        NSData *updateItemData = SPUArchiveRootObjectSecurely(_updateItem);
         
         if (updateItemData != nil) {
-            [self.installerConnection handleMessageWithIdentifier:SPUSentUpdateAppcastItemData data:updateItemData];
+            [_installerConnection handleMessageWithIdentifier:SPUSentUpdateAppcastItemData data:updateItemData];
         } else {
             SULog(SULogLevelError, @"Error: Archived data to send for appcast item is nil");
-        }
-        
-        BOOL canInstallSilently = NO;
-        if (data.length >= sizeof(uint8_t)) {
-            canInstallSilently = (BOOL)*(const uint8_t *)data.bytes;
-        }
-        
-        BOOL hasTargetTerminated = NO;
-        if (data.length >= sizeof(uint8_t) * 2) {
-            hasTargetTerminated = (BOOL)*((const uint8_t *)data.bytes + 1);
-        }
-        
-        [self.delegate installerDidFinishPreparationAndWillInstallImmediately:hasTargetTerminated silently:canInstallSilently];
-    } else if (identifier == SPUInstallationFinishedStage2) {
-        self.currentStage = identifier;
-        
-        if (!self.startedInstalling) {
-            // It's possible we can start from resuming to stage 2 rather than doing stage 1 again, so we should notify to start installing if we haven't done so already
-            self.startedInstalling = YES;
-            [self.delegate installerDidStartInstalling];
         }
         
         BOOL hasTargetTerminated = NO;
@@ -292,40 +336,53 @@
             hasTargetTerminated = (BOOL)*((const uint8_t *)data.bytes);
         }
         
-        [self.delegate installerWillFinishInstallationAndRelaunch:self.relaunch];
+        [delegate installerDidFinishPreparationAndWillInstallImmediately:hasTargetTerminated];
+    } else if (identifier == SPUInstallationFinishedStage2) {
+        _currentStage = (SPUInstallerMessageType)identifier;
         
-        if (!hasTargetTerminated) {
-            [self.delegate installerIsSendingAppTerminationSignal];
+        BOOL hasTargetTerminated = NO;
+        if (data.length >= sizeof(uint8_t)) {
+            hasTargetTerminated = (BOOL)*((const uint8_t *)data.bytes);
         }
+        
+        // If the target was already terminated this may be the first time we notify delegate that installation is about to happen
+        // Otherwise if the target was requested to be terminated/relaunched by the user this may be the second time
+        // Avoid re-notifying the delegate twice
+        if (!_notifiedDelegateInstallationWillFinish) {
+            _notifiedDelegateInstallationWillFinish = YES;
+            [delegate installerWillFinishInstallationAndRelaunch:_relaunch];
+        }
+        
+        [delegate installerDidStartInstallingWithApplicationTerminated:hasTargetTerminated];
     } else if (identifier == SPUInstallationFinishedStage3) {
-        self.currentStage = identifier;
+        _currentStage = (SPUInstallerMessageType)identifier;
         
-        [self.installerConnection invalidate];
-        self.installerConnection = nil;
+        [_installerConnection invalidate];
+        _installerConnection = nil;
         
-        [self.delegate installerDidFinishInstallationAndRelaunched:self.relaunch acknowledgement:^{
+        [delegate installerDidFinishInstallationAndRelaunched:_relaunch acknowledgement:^{
             dispatch_async(dispatch_get_main_queue(), ^{
-                [self.delegate installerIsRequestingAbortInstallWithError:nil];
+                [delegate installerIsRequestingAbortInstallWithError:nil];
             });
         }];
     } else if (identifier == SPUUpdaterAlivePing) {
         // Don't update the current stage; a ping request has no effect on that.
-        [self.installerConnection handleMessageWithIdentifier:SPUUpdaterAlivePong data:[NSData data]];
+        [_installerConnection handleMessageWithIdentifier:SPUUpdaterAlivePong data:[NSData data]];
     } else if (identifier == SPUInstallerError) {
         // Don't update the current stage; an installation error has no effect on that.
-        self.installerError = (NSError *)SPUUnarchiveRootObjectSecurely(data, [NSError class]);
+        _installerError = (NSError *)SPUUnarchiveRootObjectSecurely(data, [NSError class]);
     }
 }
 
-- (void)launchAutoUpdateSilently:(BOOL)silently completion:(void (^)(NSError *_Nullable))completionHandler
+- (void)launchAutoUpdateSilently:(BOOL)silently completion:(void (^)(NSError *_Nullable))completionHandler SPU_OBJC_DIRECT
 {
-    id<SUInstallerLauncherProtocol> installerLauncher = nil;
+    id<SUInstallerLauncherProtocol> installerLauncher;
+    
+#if INSTALLER_LAUNCHER_XPC_SERVICE_EMBEDDED
     __block BOOL retrievedLaunchStatus = NO;
     NSXPCConnection *launcherConnection = nil;
     
-    if (!SPUXPCServiceExists(@INSTALLER_LAUNCHER_BUNDLE_ID)) {
-        installerLauncher = [[SUInstallerLauncher alloc] init];
-    } else {
+    if (SPUXPCServiceIsEnabled(SUEnableInstallerLauncherServiceKey)) {
         launcherConnection = [[NSXPCConnection alloc] initWithServiceName:@INSTALLER_LAUNCHER_BUNDLE_ID];
         launcherConnection.remoteObjectInterface = [NSXPCInterface interfaceWithProtocol:@protocol(SUInstallerLauncherProtocol)];
         
@@ -349,8 +406,19 @@
 #endif
                 if (!retrievedLaunchStatus) {
 #pragma clang diagnostic pop
+                    NSString *additionalFailureReason;
+                    {
+                        NSString *executableFailureReason;
+                        if (!SPUXPCServiceHasExecutablePermission(@INSTALLER_LAUNCHER_NAME, &executableFailureReason)) {
+                            additionalFailureReason = [NSString stringWithFormat:@" %@", executableFailureReason];
+                        } else {
+                            additionalFailureReason = @"";
+                        }
+                    }
+                    
                     NSError *error =
-                    [NSError errorWithDomain:SUSparkleErrorDomain code:SUInstallationError userInfo:@{ NSLocalizedDescriptionKey:SULocalizedString(@"An error occurred while connecting to the installer. Please try again later.", nil) }];
+                    [NSError errorWithDomain:SUSparkleErrorDomain code:SUInstallationError userInfo:@{ NSLocalizedDescriptionKey:SULocalizedStringFromTableInBundle(@"An error occurred while connecting to the installer. Please try again later.", SPARKLE_TABLE, SUSparkleBundle(), nil),
+                        NSLocalizedFailureReasonErrorKey: [NSString stringWithFormat:@"If your app is not sandboxed, please remove or disable %@ in your app's Info.plist. Please also check Console logs for "@INSTALLER_LAUNCHER_NAME" and "@SPARKLE_RELAUNCH_TOOL_NAME" processes if there are additional details.%@", SUEnableInstallerLauncherServiceKey, additionalFailureReason]}];
                     
                     completionHandler(error);
                     
@@ -367,54 +435,35 @@
         [launcherConnection resume];
         
         installerLauncher = launcherConnection.remoteObjectProxy;
+    } else
+#endif
+    {
+        installerLauncher = [[SUInstallerLauncher alloc] init];
     }
     
     // Our driver (automatic or UI based) has a say if interaction is allowed as well
     // An automatic driver may disallow interaction but the updater could try again later for a UI based driver that does allow interaction
     BOOL driverAllowsInteraction = !silently;
     
-    NSString *hostBundlePath = self.host.bundle.bundlePath;
+    NSString *hostBundlePath = _host.bundle.bundlePath;
     assert(hostBundlePath != nil);
     
-    NSString *installationType = self.updateItem.installationType;
+    NSString *hostBundleIdentifier = _host.bundle.bundleIdentifier;
+    
+    NSString *installationType = _updateItem.installationType;
     assert(installationType != nil);
     
-    // The installer launcher could be in a XPC service, so we don't want to do localization in there
-    // Make sure the authorization prompt reflects whether or not the updater is updating itself, or
-    // if the updater is updating another application. We use SUHost.name property, so an application
-    // or Sparkle helper application can override its name with SUBundleName key
-    
-    SUHost *mainBundleHost = [[SUHost alloc] initWithBundle:[NSBundle mainBundle]];
-    NSString *mainBundleName = mainBundleHost.name;
-    NSString *hostName = self.host.name;
-    
-    // Changing this authorization prompt is a little complicated because the
-    // Auth database retains and caches the right we use, and there isn't a good way
-    // of updating the prompt. See code in SUInstallerLauncher.m
-    // For this reason, we don't provide localized strings for this prompt yet
-    // (and I believe, the authorization framework has a different way of specifying localizations..)
-    NSString *authorizationPrompt;
-    if ([mainBundleName isEqualToString:hostName]) {
-        authorizationPrompt = [NSString stringWithFormat:@"%1$@ wants permission to update.", hostName];
-    } else {
-        authorizationPrompt = [NSString stringWithFormat:@"%1$@ wants permission to update %2$@.", mainBundleName, hostName];
-    }
-    
-    NSString *mainBundleIdentifier;
-    {
-        NSString *bundleIdentifier = mainBundleHost.bundle.bundleIdentifier;
-        mainBundleIdentifier = (bundleIdentifier == nil) ? mainBundleName : bundleIdentifier;
-    }
-    
-    [installerLauncher launchInstallerWithHostBundlePath:hostBundlePath updaterIdentifier:mainBundleIdentifier authorizationPrompt:authorizationPrompt installationType:installationType allowingDriverInteraction:driverAllowsInteraction completion:^(SUInstallerLauncherStatus result, BOOL systemDomain) {
+    [installerLauncher launchInstallerWithHostBundlePath:hostBundlePath mainBundlePath:NSBundle.mainBundle.bundlePath installationType:installationType allowingDriverInteraction:driverAllowsInteraction completion:^(SUInstallerLauncherStatus result, BOOL systemDomain) {
         dispatch_async(dispatch_get_main_queue(), ^{
+#if INSTALLER_LAUNCHER_XPC_SERVICE_EMBEDDED
             retrievedLaunchStatus = YES;
             [launcherConnection invalidate];
+#endif
             
             switch (result) {
                 case SUInstallerLauncherFailure:
                     SULog(SULogLevelError, @"Error: Failed to gain authorization required to update target");
-                    completionHandler([NSError errorWithDomain:SUSparkleErrorDomain code:SUInstallationError userInfo:@{ NSLocalizedDescriptionKey:SULocalizedString(@"An error occurred while launching the installer. Please try again later.", nil) }]);
+                    completionHandler([NSError errorWithDomain:SUSparkleErrorDomain code:SUInstallationError userInfo:@{ NSLocalizedDescriptionKey:SULocalizedStringFromTableInBundle(@"An error occurred while launching the installer. Please try again later.", SPARKLE_TABLE, SUSparkleBundle(), nil) }]);
                     break;
                 case SUInstallerLauncherCanceled:
                     completionHandler([NSError errorWithDomain:SUSparkleErrorDomain code:SUInstallationCanceledError userInfo:nil]);
@@ -423,59 +472,90 @@
                     completionHandler([NSError errorWithDomain:SUSparkleErrorDomain code:SUInstallationAuthorizeLaterError userInfo:nil]);
                     break;
                 case SUInstallerLauncherSuccess:
-                    self.systemDomain = systemDomain;
+                    self->_systemDomain = systemDomain;
                     [self setUpConnection];
                     [self sendInstallationData];
+
+                    // Complete immediately so the caller can set up state (e.g., _downloadedUpdateForRemoval)
+                    // before installer messages arrive on the main queue.
+                    // Previously, completionHandler was called inside the probe callback, which meant
+                    // installer messages (SPUExtractionStarted, SPUArchiveExtractionFailed) could be
+                    // processed before the completion handler fired, leaving _downloadedUpdateForRemoval
+                    // unset and causing an assertion crash in clearDownloadedUpdate.
                     completionHandler(nil);
+
+                    // Send a probe/ping to the status service, which should boost/prioritize its startup
+                    if (hostBundleIdentifier != nil) {
+                        [SPUProbeInstallStatus probeInstallerInProgressForHostBundleIdentifier:hostBundleIdentifier completion:^(BOOL statusServiceIsRunning) {
+                            if (!statusServiceIsRunning) {
+                                SULog(SULogLevelError, @"Error: failed to probe status service for %@ from the framework", hostBundleIdentifier);
+                            }
+                        }];
+                    }
+                    
                     break;
             }
         });
     }];
 }
 
-- (BOOL)mayUpdateAndRestart
+- (BOOL)mayUpdateAndRestart SPU_OBJC_DIRECT
 {
-    return (!self.updaterDelegate || ![self.updaterDelegate respondsToSelector:@selector((updaterShouldRelaunchApplication:))] || [self.updaterDelegate updaterShouldRelaunchApplication:self.updater]);
+    id<SPUUpdaterDelegate> updaterDelegate = _updaterDelegate;
+    return (!updaterDelegate || ![updaterDelegate respondsToSelector:@selector((updaterShouldRelaunchApplication:))] || [updaterDelegate updaterShouldRelaunchApplication:_updater]);
 }
 
 - (void)installWithToolAndRelaunch:(BOOL)relaunch displayingUserInterface:(BOOL)showUI
 {
-    assert(self.updateItem);
+    assert(_updateItem);
     
     if (![self mayUpdateAndRestart])
     {
-        [self.delegate installerIsRequestingAbortInstallWithError:nil];
+        [_delegate installerIsRequestingAbortInstallWithError:nil];
         return;
     }
     
     // Give the host app an opportunity to postpone the install and relaunch.
-    if (!self.postponedOnce)
-    {
-        if ([self.updaterDelegate respondsToSelector:@selector(updater:shouldPostponeRelaunchForUpdate:untilInvokingBlock:)]) {
-            self.postponedOnce = YES;
-            __weak SPUInstallerDriver *weakSelf = self;
-            if ([self.updaterDelegate updater:self.updater shouldPostponeRelaunchForUpdate:self.updateItem untilInvokingBlock:^{
-                [weakSelf installWithToolAndRelaunch:relaunch displayingUserInterface:showUI];
-            }]) {
-                return;
-            }
+    id updater = _updater;
+    id<SPUUpdaterDelegate> updaterDelegate = _updaterDelegate;
+    if (updater != nil && [updaterDelegate respondsToSelector:@selector(updater:shouldPostponeRelaunchForUpdate:untilInvokingBlock:)]) {
+        __weak __typeof__(self) weakSelf = self;
+        if ([updaterDelegate updater:updater shouldPostponeRelaunchForUpdate:_updateItem untilInvokingBlock:^{
+            [weakSelf _installWithToolAndRelaunch:relaunch displayingUserInterface:showUI];
+        }]) {
+            return;
         }
+    }
+    
+    [self _installWithToolAndRelaunch:relaunch displayingUserInterface:showUI];
+}
+
+- (void)_installWithToolAndRelaunch:(BOOL)relaunch displayingUserInterface:(BOOL)showUI SPU_OBJC_DIRECT
+{
+    if (_updateWillInstallHandler != NULL) {
+        _updateWillInstallHandler();
     }
     
     // Set up connection to the installer if one is not set up already
     [self setUpConnection];
     
     // For resumability, we'll assume we are far enough for the installation to continue
-    self.currentStage = SPUInstallationFinishedStage1;
+    _currentStage = SPUInstallationFinishedStage1;
     
-    self.relaunch = relaunch;
+    _relaunch = relaunch;
+    
+    // The user can request trying to relaunch/quit the app multiple times
+    // Avoid re-notifying the delegate twice
+    if (!_notifiedDelegateInstallationWillFinish) {
+        _notifiedDelegateInstallationWillFinish = YES;
+        [_delegate installerWillFinishInstallationAndRelaunch:relaunch];
+    }
     
     uint8_t response[2] = {(uint8_t)relaunch, (uint8_t)showUI};
     NSData *responseData = [NSData dataWithBytes:response length:sizeof(response)];
     
-    [self.installerConnection handleMessageWithIdentifier:SPUResumeInstallationToStage2 data:responseData];
-    
     // the installer will send us SPUInstallationFinishedStage2 when stage 2 is done
+    [_installerConnection handleMessageWithIdentifier:SPUResumeInstallationToStage2 data:responseData];
 }
 
 - (void)cancelUpdate
@@ -483,19 +563,19 @@
     // Set up connection to the installer if one is not set up already
     [self setUpConnection];
     
-    self.aborted = YES;
+    _aborted = YES;
     
-    [self.installerConnection handleMessageWithIdentifier:SPUCancelInstallation data:[NSData data]];
+    [_installerConnection handleMessageWithIdentifier:SPUCancelInstallation data:[NSData data]];
     
-    [self.delegate installerIsRequestingAbortInstallWithError:nil];
+    [_delegate installerIsRequestingAbortInstallWithError:nil];
 }
 
 - (void)abortInstall
 {
-    self.aborted = YES;
-    if (self.installerConnection != nil) {
-        [self.installerConnection invalidate];
-        self.installerConnection = nil;
+    _aborted = YES;
+    if (_installerConnection != nil) {
+        [_installerConnection invalidate];
+        _installerConnection = nil;
     }
 }
 

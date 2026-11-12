@@ -9,21 +9,26 @@
 #import "SUDiskImageUnarchiver.h"
 #import "SUUnarchiverNotifier.h"
 #import "SULog.h"
+#import "SUErrors.h"
 
 
 #include "AppKitPrevention.h"
 
-@interface SUDiskImageUnarchiver ()
-
-@property (nonatomic, copy, readonly) NSString *archivePath;
-@property (nullable, nonatomic, copy, readonly) NSString *decryptionPassword;
-
+@interface SUDiskImageUnarchiver () <NSFileManagerDelegate>
 @end
 
 @implementation SUDiskImageUnarchiver
+{
+    NSString *_archivePath;
+    NSString *_decryptionPassword;
+    NSString *_extractionDirectory;
+    NSString *_extractionMountDirectory;
+    
+    SUUnarchiverNotifier *_notifier;
 
-@synthesize archivePath = _archivePath;
-@synthesize decryptionPassword = _decryptionPassword;
+    double _currentExtractionProgress;
+    double _fileProgressIncrement;
+}
 
 + (BOOL)canUnarchivePath:(NSString *)path
 {
@@ -35,173 +40,348 @@
     return NO;
 }
 
-- (instancetype)initWithArchivePath:(NSString *)archivePath decryptionPassword:(nullable NSString *)decryptionPassword
+- (instancetype)initWithArchivePath:(NSString *)archivePath extractionDirectory:(NSString *)extractionDirectory extractionMountDirectory:(nullable NSString *)extractionMountDirectory decryptionPassword:(nullable NSString *)decryptionPassword
 {
     self = [super init];
     if (self != nil) {
         _archivePath = [archivePath copy];
         _decryptionPassword = [decryptionPassword copy];
+        _extractionDirectory = [extractionDirectory copy];
+        _extractionMountDirectory = [extractionMountDirectory copy];
     }
     return self;
 }
 
-- (void)unarchiveWithCompletionBlock:(void (^)(NSError * _Nullable))completionBlock progressBlock:(void (^ _Nullable)(double))progressBlock
+- (BOOL)needsVerifyBeforeExtractionKey
+{
+    return NO;
+}
+
+- (void)unarchiveWithCompletionBlock:(void (^)(NSError * _Nullable))completionBlock progressBlock:(void (^ _Nullable)(double))progressBlock waitForCleanup:(BOOL)waitForCleanup
 {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         SUUnarchiverNotifier *notifier = [[SUUnarchiverNotifier alloc] initWithCompletionBlock:completionBlock progressBlock:progressBlock];
-        [self extractDMGWithNotifier:notifier];
+        [self extractDMGWithNotifier:notifier waitForCleanup:waitForCleanup];
     });
 }
 
+static NSUInteger fileCountForDirectory(NSFileManager *fileManager, NSString *itemPath)
+{
+    NSUInteger fileCount = 0;
+    NSDirectoryEnumerator *dirEnum = [fileManager enumeratorAtPath:itemPath];
+    for (NSString * __unused currentFile in dirEnum) {
+        fileCount++;
+    }
+    
+    return fileCount;
+}
+
+- (BOOL)fileManager:(NSFileManager *)fileManager shouldCopyItemAtURL:(NSURL *)srcURL toURL:(NSURL *)dstURL
+{
+    _currentExtractionProgress += _fileProgressIncrement;
+    [_notifier notifyProgress:_currentExtractionProgress];
+    
+    return YES;
+}
+
 // Called on a non-main thread.
-- (void)extractDMGWithNotifier:(SUUnarchiverNotifier *)notifier
+- (void)extractDMGWithNotifier:(SUUnarchiverNotifier *)notifier waitForCleanup:(BOOL)waitForCleanup SPU_OBJC_DIRECT
 {
 	@autoreleasepool {
         BOOL mountedSuccessfully = NO;
+
+        // Only use modern diskutil extraction over hdiutil if extraction mount directory has been specified
+        BOOL useModernDiskUtilImplementation = (_extractionMountDirectory != nil);
         
         // get a unique mount point path
-        NSString *mountPoint = nil;
-        NSFileManager *manager;
-        NSError *error;
-        NSArray *contents;
-        do
-		{
-            // Using NSUUID would make creating UUIDs be done in Cocoa,
-            // and thus managed under ARC. Sadly, the class is in 10.8 and later.
-            CFUUIDRef uuid = CFUUIDCreate(NULL);
-            if (uuid)
-            {
-                NSString *uuidString = CFBridgingRelease(CFUUIDCreateString(NULL, uuid));
-                if (uuidString)
-                {
-                    mountPoint = [@"/Volumes" stringByAppendingPathComponent:uuidString];
-                }
-                CFRelease(uuid);
+        NSString *mountPoint;
+        NSError *error = nil;
+        if (useModernDiskUtilImplementation) {
+            mountPoint = _extractionMountDirectory;
+        } else {
+            do {
+                NSString *uuidString = [[NSUUID UUID] UUIDString];
+                mountPoint = [@"/Volumes" stringByAppendingPathComponent:uuidString];
             }
-		}
-        // Note: this check does not follow symbolic links, which is what we want
-		while ([[NSURL fileURLWithPath:mountPoint] checkResourceIsReachableAndReturnError:NULL]);
+            // Note: this check does not follow symbolic links, which is what we want
+            while ([[NSURL fileURLWithPath:mountPoint] checkResourceIsReachableAndReturnError:NULL]);
+        }
         
-        NSData *promptData = nil;
-        promptData = [NSData dataWithBytes:"yes\n" length:4];
-        
-        NSMutableArray *arguments = [@[@"attach", self.archivePath, @"-mountpoint", mountPoint, /*@"-noverify",*/ @"-nobrowse", @"-noautoopen"] mutableCopy];
-        
-        if (self.decryptionPassword) {
-            NSMutableData *passwordData = [[self.decryptionPassword dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
-            // From the hdiutil docs:
-            // read a null-terminated passphrase from standard input
-            //
-            // Add the null terminator, then the newline
-            [passwordData appendData:[NSData dataWithBytes:"\0" length:1]];
-            [passwordData appendData:promptData];
-            promptData = passwordData;
+        if (mountPoint == nil) {
+            error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUUnarchivingError userInfo:@{ NSLocalizedDescriptionKey:@"Extraction failed because mountPoint failed to be created"}];
             
-            [arguments addObject:@"-stdinpass"];
+            [notifier notifyFailureWithError:error];
+            return;
+        }
+        
+        NSMutableData *inputData = [NSMutableData data];
+        
+        // Prepare stdin data for passwords and license agreements
+        {
+            // If no password is supplied, we will still be asked a password.
+            // In that case we respond with an empty password.
+            NSData *decryptionPasswordData = [_decryptionPassword dataUsingEncoding:NSUTF8StringEncoding];
+            if (decryptionPasswordData != nil) {
+                [inputData appendData:decryptionPasswordData];
+            }
+            
+            if (useModernDiskUtilImplementation) {
+                // Unlike hdiutil, diskutil's --stdinpassphrase expects the passphrase to be
+                // newline-terminated rather than null-terminated
+                [inputData appendBytes:"\n" length:1];
+            } else {
+                // From the hdiutil docs:
+                // read a null-terminated passphrase from standard input
+                //
+                // Add the null terminator
+                [inputData appendBytes:"\0" length:1];
+            }
+
+            // Append prompt data for license agreements
+            [inputData appendBytes:"yes\n" length:4];
+        }
+        
+        // Always pass -stdinpass / --stdinpassphrase so we gracefully handle password protected disk images even if we aren't expecting them
+        NSArray<NSString *> *arguments;
+        if (useModernDiskUtilImplementation) {
+            arguments = @[@"image", @"attach", _archivePath, @"--mountPoint", mountPoint, @"--nobrowse", @"--stdinpassphrase"];
+        } else {
+            // Finder doesn't verify disk images anymore beyond the code signing signature (if available)
+            // Opt out of the old CRC checksum checks
+            arguments = @[@"attach", _archivePath, @"-mountpoint", mountPoint, @"-noverify", @"-nobrowse", @"-noautoopen", @"-stdinpass"];
         }
         
         NSData *output = nil;
+        NSData *errorOutput = nil;
         NSInteger taskResult = -1;
-        @try
+        
+        NSURL *mountPointURL = [NSURL fileURLWithPath:mountPoint isDirectory:YES];
+        NSURL *extractionDirectoryURL = [NSURL fileURLWithPath:_extractionDirectory isDirectory:YES];
+        NSMutableArray<NSString *> *itemsToExtract = [NSMutableArray array];
+        NSUInteger totalFileExtractionCount = 0;
+        
+        NSFileManager *manager = nil;
+        NSArray *contents = nil;
+        
+        BOOL success = YES;
+        
         {
             NSTask *task = [[NSTask alloc] init];
-            task.launchPath = @"/usr/bin/hdiutil";
-            task.currentDirectoryPath = @"/";
+            if (useModernDiskUtilImplementation) {
+                task.executableURL = [NSURL fileURLWithPath:@"/usr/sbin/diskutil" isDirectory:NO];
+            } else {
+                task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/hdiutil" isDirectory:NO];
+                task.currentDirectoryPath = @"/";
+            }
+            
             task.arguments = arguments;
             
             NSPipe *inputPipe = [NSPipe pipe];
             NSPipe *outputPipe = [NSPipe pipe];
+            NSPipe *errorPipe = [NSPipe pipe];
             
             task.standardInput = inputPipe;
             task.standardOutput = outputPipe;
+            task.standardError = errorPipe;
             
-            [task launch];
+            dispatch_queue_t captureQueue = dispatch_queue_create("org.sparkle-project.sparkle.dmg-output", DISPATCH_QUEUE_SERIAL);
             
-            [notifier notifyProgress:0.125];
-
-            [inputPipe.fileHandleForWriting writeData:promptData];
+            NSFileHandle *fileStdHandle = outputPipe.fileHandleForReading;
+            NSMutableData *currentOutput = [NSMutableData data];
+            
+            fileStdHandle.readabilityHandler = ^(NSFileHandle *file) {
+                NSData *availableData = file.availableData;
+                
+                dispatch_sync(captureQueue, ^{
+                    [currentOutput appendData:availableData];
+                });
+            };
+            
+            NSFileHandle *fileErrHandle = errorPipe.fileHandleForReading;
+            NSMutableData *currentErrorOutput = [NSMutableData data];
+            
+            fileErrHandle.readabilityHandler = ^(NSFileHandle *file) {
+                NSData *availableData = file.availableData;
+                
+                dispatch_sync(captureQueue, ^{
+                    [currentErrorOutput appendData:availableData];
+                });
+            };
+            
+            __block NSData *capturedOutput = nil;
+            __block NSData *capturedErrorOutput = nil;
+            
+            dispatch_semaphore_t terminationSemaphore = dispatch_semaphore_create(0);
+            task.terminationHandler = ^(NSTask *__unused terminatingTask) {
+                fileStdHandle.readabilityHandler = nil;
+                fileErrHandle.readabilityHandler = nil;
+                
+                dispatch_semaphore_signal(terminationSemaphore);
+            };
+            
+            if (![task launchAndReturnError:&error]) {
+                goto reportError;
+            }
+            
+            if (![inputPipe.fileHandleForWriting writeData:inputData error:&error]) {
+                goto reportError;
+            }
+            
             [inputPipe.fileHandleForWriting closeFile];
             
-            // Read data to end *before* waiting until the task ends so we don't deadlock if the stdout buffer becomes full if we haven't consumed from it
-            output = [outputPipe.fileHandleForReading readDataToEndOfFile];
+            dispatch_semaphore_wait(terminationSemaphore, DISPATCH_TIME_FOREVER);
             
-            [task waitUntilExit];
+            dispatch_sync(captureQueue, ^{
+                capturedOutput = [currentOutput copy];
+                capturedErrorOutput = [currentErrorOutput copy];
+            });
+            
+            output = capturedOutput;
+            errorOutput = capturedErrorOutput;
+            
             taskResult = task.terminationStatus;
         }
-        @catch (NSException *)
-        {
+        
+        if (taskResult != 0) {
+            NSString *resultStr = output ? [[NSString alloc] initWithData:output encoding:NSUTF8StringEncoding] : nil;
+            NSString *errorStr = errorOutput ? [[NSString alloc] initWithData:errorOutput encoding:NSUTF8StringEncoding] : nil;
+            SULog(SULogLevelError, @"%@ failed with code: %ld data: <<%@>> error: <<%@>>", (useModernDiskUtilImplementation ? @"diskutil" : @"hdiutil"), (long)taskResult, resultStr, errorStr);
+            
+            error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUUnarchivingError userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithFormat:@"Extraction failed due to %@ returning %ld status: %@", useModernDiskUtilImplementation ? @"diskutil" : @"hdiutil", (long)taskResult, resultStr]}];
+            
             goto reportError;
         }
         
-        [notifier notifyProgress:0.5];
-
-		if (taskResult != 0)
-		{
-            NSString *resultStr = output ? [[NSString alloc] initWithData:output encoding:NSUTF8StringEncoding] : nil;
-            SULog(SULogLevelError, @"hdiutil failed with code: %ld data: <<%@>>", (long)taskResult, resultStr);
-            goto reportError;
-        }
         mountedSuccessfully = YES;
+        
+        // Mounting can take some time, so increment progress
+        _currentExtractionProgress = 0.1;
+        [notifier notifyProgress:_currentExtractionProgress];
         
         // Now that we've mounted it, we need to copy out its contents.
         manager = [[NSFileManager alloc] init];
         contents = [manager contentsOfDirectoryAtPath:mountPoint error:&error];
-        if (error)
-        {
+        if (contents == nil) {
             SULog(SULogLevelError, @"Couldn't enumerate contents of archive mounted at %@: %@", mountPoint, error);
             goto reportError;
         }
-
-        double itemsCopied = 0;
-        double totalItems = [contents count];
-
-		for (NSString *item in contents)
-		{
-            NSString *fromPath = [mountPoint stringByAppendingPathComponent:item];
-            NSString *toPath = [[self.archivePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:item];
+        
+        // Sparkle can support installing pkg files, app bundles, and other bundle types for plug-ins
+        // We must not filter any of those out
+        for (NSString *item in contents) {
+            NSURL *fromPathURL = [mountPointURL URLByAppendingPathComponent:item];
             
-            // We skip any files in the DMG which are not readable.
-            if (![manager isReadableFileAtPath:fromPath]) {
+            NSString *lastPathComponent = fromPathURL.lastPathComponent;
+            
+            // Ignore hidden files
+            if ([lastPathComponent hasPrefix:@"."]) {
                 continue;
             }
             
-            itemsCopied += 1.0;
-            [notifier notifyProgress:0.5 + itemsCopied/(totalItems*2.0)];
-
-            SULog(SULogLevelDefault, @"copyItemAtPath:%@ toPath:%@", fromPath, toPath);
-
-			if (![manager copyItemAtPath:fromPath toPath:toPath error:&error])
-			{
+            // Ignore aliases
+            NSNumber *aliasFlag = nil;
+            if ([fromPathURL getResourceValue:&aliasFlag forKey:NSURLIsAliasFileKey error:NULL] && aliasFlag.boolValue) {
+                continue;
+            }
+            
+            // Ignore symbolic links
+            NSNumber *symbolicFlag = nil;
+            if ([fromPathURL getResourceValue:&symbolicFlag forKey:NSURLIsSymbolicLinkKey error:NULL] && symbolicFlag.boolValue) {
+                continue;
+            }
+            
+            // Ensure file is readable
+            NSNumber *isReadableFlag = nil;
+            if ([fromPathURL getResourceValue:&isReadableFlag forKey:NSURLIsReadableKey error:NULL] && !isReadableFlag.boolValue) {
+                continue;
+            }
+            
+            NSNumber *isDirectoryFlag = nil;
+            if (![fromPathURL getResourceValue:&isDirectoryFlag forKey:NSURLIsDirectoryKey error:NULL]) {
+                continue;
+            }
+            
+            BOOL isDirectory = isDirectoryFlag.boolValue;
+            NSString *pathExtension = fromPathURL.pathExtension;
+            
+            if (isDirectory) {
+                // Skip directory types that aren't bundles or regular directories
+                if ([pathExtension isEqualToString:@"rtfd"]) {
+                    continue;
+                }
+            } else {
+                // The only non-directory files we care about are (m)pkg files
+                if (![pathExtension isEqualToString:@"pkg"] && ![pathExtension isEqualToString:@"mpkg"]) {
+                    continue;
+                }
+            }
+            
+            if (isDirectory) {
+                totalFileExtractionCount += fileCountForDirectory(manager, fromPathURL.path);
+            } else {
+                totalFileExtractionCount++;
+            }
+            
+            [itemsToExtract addObject:item];
+        }
+        
+        _fileProgressIncrement = (0.99 - _currentExtractionProgress) / (double)totalFileExtractionCount;
+        _notifier = notifier;
+        
+        // Copy all items we want to extract and notify of progress
+        manager.delegate = self;
+        for (NSString *item in itemsToExtract) {
+            NSURL *fromURL = [mountPointURL URLByAppendingPathComponent:item];
+            NSURL *toURL = [extractionDirectoryURL URLByAppendingPathComponent:item];
+            
+            if (![manager copyItemAtURL:fromURL toURL:toURL error:&error]) {
+                SULog(SULogLevelError, @"Failed to copy '%@' to '%@' with error: %@", fromURL.path, toURL.path, error);
                 goto reportError;
             }
         }
         
-        [notifier notifySuccess];
+        [notifier notifyProgress:1.0];
+        
         goto finally;
         
     reportError:
-        [notifier notifyFailureWithError:error];
+        success = NO;
 
     finally:
         if (mountedSuccessfully) {
             NSTask *task = [[NSTask alloc] init];
-            task.launchPath = @"/usr/bin/hdiutil";
-            task.arguments = @[@"detach", mountPoint, @"-force"];
+            
+            if (useModernDiskUtilImplementation) {
+                task.launchPath = @"/usr/sbin/diskutil";
+                task.arguments = @[@"eject", @"force", mountPoint];
+            } else {
+                task.launchPath = @"/usr/bin/hdiutil";
+                task.arguments = @[@"detach", mountPoint, @"-force"];
+            }
             task.standardOutput = [NSPipe pipe];
             task.standardError = [NSPipe pipe];
             
-            @try {
-                [task launch];
-            } @catch (NSException *exception) {
-                SULog(SULogLevelError, @"Failed to unmount %@", mountPoint);
-                SULog(SULogLevelError, @"Exception: %@", exception);
+            NSError *launchCleanupError = nil;
+            if (![task launchAndReturnError:&launchCleanupError]) {
+                SULog(SULogLevelError, @"%@ failed to unmount %@", (useModernDiskUtilImplementation ? @"diskutil" : @"hdiutil"), mountPoint);
+                SULog(SULogLevelError, @"Error: %@", launchCleanupError);
+            } else if (waitForCleanup || !success) {
+                // On the failure path the caller may immediately remove the directory the mount point lives in,
+                // so don't report failure until the volume is actually gone
+                [task waitUntilExit];
             }
         } else {
-            SULog(SULogLevelError, @"Can't mount DMG %@", self.archivePath);
+            SULog(SULogLevelError, @"Can't mount DMG %@", _archivePath);
+        }
+        
+        if (success) {
+            [notifier notifySuccess];
+        } else {
+            [notifier notifyFailureWithError:error];
         }
     }
 }
 
-- (NSString *)description { return [NSString stringWithFormat:@"%@ <%@>", [self class], self.archivePath]; }
+- (NSString *)description { return [NSString stringWithFormat:@"%@ <%@>", [self class], _archivePath]; }
 
 @end

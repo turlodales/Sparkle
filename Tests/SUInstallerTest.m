@@ -32,13 +32,13 @@
     [super tearDown];
 }
 
-#if __clang_major__ >= 6
+#if SPARKLE_BUILD_PACKAGE_SUPPORT
 - (void)testInstallIfRoot
 {
     uid_t uid = getuid();
 
-    if (uid) {
-        NSLog(@"Test must be run as root: sudo xctest -XCTest SUInstallerTest 'Sparkle Unit Tests.xctest'");
+    if (uid != 0) {
+        NSLog(@"Test must be run as root: sudo xcodebuild -project Sparkle.xcodeproj -scheme Sparkle '-only-testing:Sparkle Unit Tests/SUInstallerTest/testInstallIfRoot' test");
         return;
     }
 
@@ -56,7 +56,7 @@
     NSError *installerError = nil;
     // Note: we may not be using the "correct" home directory or user name (they will be root) but our test pkg does not have
     // pre/post install scripts so it doesn't matter
-    id<SUInstallerProtocol> installer = [SUInstaller installerForHost:host expectedInstallationType:SPUInstallationTypeGuidedPackage updateDirectory:[path stringByDeletingLastPathComponent] homeDirectory:NSHomeDirectory() userName:NSUserName() error:&installerError];
+    id<SUInstallerProtocol> installer = [SUInstaller installerForHost:host expectedInstallationType:SPUInstallationTypeGuidedPackage updateDirectory:[path stringByDeletingLastPathComponent] connectionCodeSigningValidationSkipped:NO homeDirectory:NSHomeDirectory() userName:NSUserName() error:&installerError];
     
     if (installer == nil) {
         XCTFail(@"Installer is nil with error: %@", installerError);

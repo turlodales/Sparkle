@@ -10,16 +10,14 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-@class SPUURLRequest;
-
 // The protocol that this service will vend as its API. This header file will also need to be visible to the process hosting the service.
 @protocol SPUDownloaderProtocol
 
-- (void)startPersistentDownloadWithRequest:(SPUURLRequest *)request bundleIdentifier:(NSString *)bundleIdentifier desiredFilename:(NSString *)desiredFilename;
+- (void)startPersistentDownloadWithRequest:(NSURLRequest *)request bundleIdentifier:(NSString *)bundleIdentifier desiredFilename:(NSString *)desiredFilename;
 
-- (void)startTemporaryDownloadWithRequest:(SPUURLRequest *)request;
+- (void)startTemporaryDownloadWithRequest:(NSURLRequest *)request;
 
-- (void)removeDownloadDirectory:(NSString *)directoryName bundleIdentifier:(NSString *)bundleIdentifier;
+- (void)removeDownloadDirectoryWithDownloadToken:(NSString *)downloadToken bundleIdentifier:(NSString *)bundleIdentifier;
 
 - (void)cleanup:(void (^)(void))completionHandler;
 

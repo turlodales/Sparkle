@@ -45,13 +45,13 @@ __FBSDID("$FreeBSD: src/usr.bin/bsdiff/bsdiff/bsdiff.c, v 1.1 2005/08/06 01:59:0
 /* matchlen(old, oldsize, new, newsize)
  *
  * Returns the length of the longest common prefix between 'old' and 'new'. */
-static off_t matchlen(u_char *old, off_t oldsize, u_char *new, off_t newsize)
+static off_t matchlen(u_char *old, off_t oldsize, u_char *newp, off_t newsize)
 {
     off_t i;
 
     for (i = 0; (i < oldsize) && (i < newsize); i++)
     {
-        if (old[i] != new[i])
+        if (old[i] != newp[i])
             break;
     }
 
@@ -66,13 +66,13 @@ static off_t matchlen(u_char *old, off_t oldsize, u_char *new, off_t newsize)
  * sort to consider. If you're searching all suffixes, 'st = 0' and 'en =
  * oldsize - 1'. */
 static off_t search(off_t *I, u_char *old, off_t oldsize,
-        u_char *new, off_t newsize, off_t st, off_t en, off_t *pos)
+        u_char *newp, off_t newsize, off_t st, off_t en, off_t *pos)
 {
     off_t x, y;
 
     if (en - st < 2) {
-        x = matchlen(old + I[st], oldsize - I[st], new, newsize);
-        y = matchlen(old + I[en], oldsize - I[en], new, newsize);
+        x = matchlen(old + I[st], oldsize - I[st], newp, newsize);
+        y = matchlen(old + I[en], oldsize - I[en], newp, newsize);
 
         if (x > y) {
             *pos = I[st];
@@ -84,11 +84,13 @@ static off_t search(off_t *I, u_char *old, off_t oldsize,
     }
 
     x = st + (en - st)/2;
-    if (memcmp(old + I[x], new, (size_t)(MIN(oldsize - I[x], newsize))) < 0) {
-        return search(I, old, oldsize, new, newsize, x, en, pos);
+    /* Modification ported from ChromiumOS project:
+     * https://chromium.googlesource.com/chromiumos/third_party/bsdiff/+/58146f74abd6b1b69693943195f37f4ac6a6acef%5E%21/#F0 */
+    if (memcmp(old + I[x], newp, (size_t)(MIN(oldsize - I[x], newsize))) <= 0) {
+        return search(I, old, oldsize, newp, newsize, x, en, pos);
     } else {
-        return search(I, old, oldsize, new, newsize, st, x, pos);
-    };
+        return search(I, old, oldsize, newp, newsize, st, x, pos);
+    }
 }
 
 /* offtout(x, buf)
@@ -121,7 +123,7 @@ int bsdiff(int argc, char *argv[]); // Added by AMM: suppresses a warning about 
 
 int bsdiff(int argc, char *argv[])
 {
-    u_char *old = NULL,*new = NULL;           /* contents of old, new files */
+    u_char *old = NULL,*newp = NULL;           /* contents of old, new files */
     off_t oldsize = 0, newsize = 0;     /* length of old, new files */
     off_t *I = NULL,*V = NULL;                /* arrays used for suffix sort; I is ordering */
     off_t scan = 0;                 /* position of current match in old file */
@@ -152,8 +154,8 @@ int bsdiff(int argc, char *argv[])
         goto cleanup;
     }
 
-    if (((I = malloc(((size_t)oldsize + 1) * sizeof(off_t))) == NULL) ||
-        ((V = malloc(((size_t)oldsize + 1) * sizeof(off_t))) == NULL)) {
+    if (((I = (off_t *)malloc(((size_t)oldsize + 1) * sizeof(off_t))) == NULL) ||
+        ((V = (off_t *)malloc(((size_t)oldsize + 1) * sizeof(off_t))) == NULL)) {
         warn("Failed to allocate memory for I or V");
         goto cleanup;
     }
@@ -165,14 +167,14 @@ int bsdiff(int argc, char *argv[])
     free(V);
     V = NULL;
     
-    new = readfile(argv[2], &newsize);
-    if (new == NULL) {
+    newp = readfile(argv[2], &newsize);
+    if (newp == NULL) {
         warn("new file error: %s", argv[2]);
         goto cleanup;
     }
 
-    if (((db = malloc((size_t)newsize + 1)) == NULL) ||
-        ((eb = malloc((size_t)newsize + 1)) == NULL)) {
+    if (((db = (u_char *)malloc((size_t)newsize + 1)) == NULL) ||
+        ((eb = (u_char *)malloc((size_t)newsize + 1)) == NULL)) {
         warn("Failed to allocate memory for db or eb");
         goto cleanup;
     }
@@ -212,19 +214,29 @@ int bsdiff(int argc, char *argv[])
     lastoffset = 0;
     while (scan < newsize) {
         oldscore = 0;
-
+        /* Modification ported from ChromiumOS project:
+         * https://chromium.googlesource.com/chromiumos/third_party/bsdiff/+/a055996c743add7a9558839276fd1e4994d16bd3%5E%21/#F0 */
+        /* If we come across a large block of data that only differs
+         * by less than 8 bytes, this loop will take a long time to
+         * go past that block of data. We need to track the number of
+         * times we're stuck in the block and break out of it. */
+        int num_less_than_eight = 0;
+        off_t prev_len, prev_oldscore, prev_pos;
         for (scsc = scan += len; scan < newsize; scan++) {
+            prev_len = len;
+            prev_oldscore = oldscore;
+            prev_pos = pos;
             /* 'oldscore' is the number of characters that match between the
              * substrings 'old[lastoffset + scan:lastoffset + scsc]' and
              * 'new[scan:scsc]'. */
-            len = search(I, old, oldsize, new + scan, newsize - scan,
+            len = search(I, old, oldsize, newp + scan, newsize - scan,
                     0, oldsize, &pos);
 
             /* If this match extends further than the last one, add any new
              * matching characters to 'oldscore'. */
             for (; scsc < scan + len; scsc++) {
                 if ((scsc + lastoffset < oldsize) &&
-                    (old[scsc + lastoffset] == new[scsc]))
+                    (old[scsc + lastoffset] == newp[scsc]))
                     oldscore++;
             }
 
@@ -238,8 +250,21 @@ int bsdiff(int argc, char *argv[])
             /* Since we're advancing 'scan' by 1, remove the character under it
              * from 'oldscore' if it matches. */
             if ((scan + lastoffset < oldsize) &&
-                (old[scan + lastoffset] == new[scan]))
+                (old[scan + lastoffset] == newp[scan]))
                 oldscore--;
+
+            /* Modification ported from ChromiumOS project:
+             * https://chromium.googlesource.com/chromiumos/third_party/bsdiff/+/426e4aa1cbeb3c8a73002047d7a796ca8e5e17d4%5E%21/#F0 */
+            const off_t fuzz = 8;
+            if (prev_len - fuzz <= len && len <= prev_len &&
+                prev_oldscore - fuzz <= oldscore &&
+                oldscore <= prev_oldscore &&
+                prev_pos <= pos && pos <= prev_pos + fuzz &&
+                oldscore <= len && len <= oldscore + fuzz)
+                ++num_less_than_eight;
+            else
+                num_less_than_eight=0;
+            if (num_less_than_eight > 100) break;
         }
 
         /* Skip this section if we found an exact match that would be
@@ -251,7 +276,7 @@ int bsdiff(int argc, char *argv[])
             Sf = 0;
             lenf = 0;
             for (i = 0; (lastscan + i < scan) && (lastpos + i < oldsize);) {
-                if (old[lastpos + i] == new[lastscan + i])
+                if (old[lastpos + i] == newp[lastscan + i])
                     s++;
                 i++;
                 if (s * 2 - i > Sf * 2 - lenf) {
@@ -266,7 +291,7 @@ int bsdiff(int argc, char *argv[])
                 s = 0;
                 Sb = 0;
                 for (i = 1; (scan >= lastscan + i) && (pos >= i); i++) {
-                    if (old[pos - i] == new[scan - i])
+                    if (old[pos - i] == newp[scan - i])
                         s++;
                     if (s * 2 - i > Sb * 2 - lenb) {
                         Sb = s;
@@ -284,10 +309,10 @@ int bsdiff(int argc, char *argv[])
                 Ss = 0;
                 lens = 0;
                 for (i = 0; i < overlap; i++) {
-                    if (new[lastscan + lenf - overlap + i] ==
+                    if (newp[lastscan + lenf - overlap + i] ==
                         old[lastpos + lenf - overlap + i])
                         s++;
-                    if (new[scan - lenb + i] == old[pos - lenb + i])
+                    if (newp[scan - lenb + i] == old[pos - lenb + i])
                         s--;
                     if (s > Ss) {
                         Ss = s;
@@ -301,11 +326,11 @@ int bsdiff(int argc, char *argv[])
 
             /* Write the diff data for the last match to the diff section... */
             for (i = 0; i < lenf; i++)
-                db[dblen + i] = new[lastscan + i] - old[lastpos + i];
+                db[dblen + i] = newp[lastscan + i] - old[lastpos + i];
             /* ... and, if there's a gap between the extensions just
              * calculated, write the data in that gap to the extra section. */
             for (i = 0; i< (scan - lenb) - (lastscan + lenf); i++)
-                eb[eblen + i] = new[lastscan + lenf + i];
+                eb[eblen + i] = newp[lastscan + lenf + i];
 
             /* Update the diff and extra section lengths accordingly. */
             dblen += lenf;
@@ -400,7 +425,7 @@ cleanup:
     free(I);
     free(V);
     free(old);
-    free(new);
+    free(newp);
 
     return exitstatus;
 }

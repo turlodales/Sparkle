@@ -6,19 +6,24 @@
 //  Copyright © 2016 Sparkle Project. All rights reserved.
 //
 
-#if __has_feature(modules)
-#if __has_warning("-Watimport-in-framework-header")
-#pragma clang diagnostic ignored "-Watimport-in-framework-header"
-#endif
-@import Foundation;
-#else
 #import <Foundation/Foundation.h>
-#endif
+
+#if defined(BUILDING_SPARKLE_SOURCES_EXTERNALLY)
+// Ignore incorrect warning
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wquoted-include-in-framework-header"
+#import "SUExport.h"
+#import "SPUUpdateCheck.h"
+#import "SPUUserUpdateState.h"
+#pragma clang diagnostic pop
+#else
 #import <Sparkle/SUExport.h>
 #import <Sparkle/SPUUpdateCheck.h>
+#import <Sparkle/SPUUserUpdateState.h>
+#endif
 
 @protocol SUVersionComparison;
-@class SPUUpdater, SUAppcast, SUAppcastItem;
+@class SPUUpdater, SUAppcast, SUAppcastItem, SPUUserUpdateState;
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -61,18 +66,22 @@ SU_EXPORT extern NSString *const SUSystemProfilerPreferredLanguageKey;
 /**
  Provides delegation methods to control the behavior of an `SPUUpdater` object.
  */
-@protocol SPUUpdaterDelegate <NSObject>
+NS_SWIFT_UI_ACTOR @protocol SPUUpdaterDelegate <NSObject>
 @optional
 
 /**
  Returns whether to allow Sparkle to check for updates.
  
  For example, this may be used to prevent Sparkle from interrupting a setup assistant.
- Alternatively, you may want to consider starting the updater after eg: the setup assistant finishes
+ Alternatively, you may want to consider starting the updater after eg: the setup assistant finishes.
+ 
+ Note in Swift, this method returns Void and is marked with the throws keyword. If this method
+ doesn't throw an error, the updater may perform an update check. Otherwise if an error is thrown (we recommend using an NSError),
+ then the updater may not perform an update check.
  
  @param updater The updater instance.
  @param updateCheck The type of update check that will be performed if the updater is allowed to check for updates.
- @param error The (optionally) populated error object if the updater may not perform a new update check.
+ @param error The  populated error object if the updater may not perform a new update check. The @c NSLocalizedDescriptionKey user info key should be populated indicating a description of the error.
  @return @c YES if the updater is allowed to check for updates, otherwise @c NO
 */
 - (BOOL)updater:(SPUUpdater *)updater mayPerformUpdateCheck:(SPUUpdateCheck)updateCheck error:(NSError * __autoreleasing *)error;
@@ -99,7 +108,7 @@ SU_EXPORT extern NSString *const SUSystemProfilerPreferredLanguageKey;
  This feature was added in Sparkle 2.
  
  @return The set of channel names the updater is allowed to find new updates in. An empty set is the default behavior,
-         which means the updater will only look for updates in the default channel.
+         which means the updater will only look for updates in the default channel. The default channel is always included in the allowed set.
  */
 - (NSSet<NSString *> *)allowedChannelsForUpdater:(SPUUpdater *)updater;
 
@@ -128,7 +137,11 @@ SU_EXPORT extern NSString *const SUSystemProfilerPreferredLanguageKey;
 /**
  Returns whether Sparkle should prompt the user about checking for new updates automatically.
  
- Use this to override the default behavior.
+ Use this to override the default behavior, which is to prompt for permission to check for updates on second app launch
+ (if SUEnableAutomaticChecks is not specified).
+ 
+ This method is not called if SUEnableAutomaticChecks is defined in Info.plist or
+ if the user has responded to a permission prompt before.
  
  @param updater The updater instance.
  @return @c YES if the updater should prompt for permission to check for new updates automatically, otherwise @c NO
@@ -173,7 +186,7 @@ SU_EXPORT extern NSString *const SUSystemProfilerPreferredLanguageKey;
  - `SPULatestAppcastItemFoundKey`: if available, this may provide the latest `SUAppcastItem` that was found. This will be @c nil if it's unavailable.
  - `SPUNoUpdateFoundReasonKey`: This will provide the `SPUNoUpdateFoundReason`.
  For example the reason could be because the latest version in the feed requires a newer OS version or could be because the user is already on the latest version.
- - `SPUNoUpdateFoundUserInitiatedKey`: A boolean that indicates if a new update was not found when the user intitiated an update check manually.
+ - `SPUNoUpdateFoundUserInitiatedKey`: A boolean that indicates if a new update was not found when the user initiated an update check manually.
  
  @param updater The updater instance.
  @param error An error containing information on why a new valid update was not found
@@ -225,23 +238,37 @@ SU_EXPORT extern NSString *const SUSystemProfilerPreferredLanguageKey;
  
  By default, the updater will always proceed with the best selected update found in an appcast. Override this to override this behavior.
  
- If you return @c NO and populate the @p error, the user is not shown this @p updateItem nor is the update downloaded or installed.
+ If you return @c NO and populate the @c error, the user is not shown this @c updateItem nor is the update downloaded or installed.
+ 
+ Note in Swift, this method returns Void and is marked with the throws keyword. If this method doesn't throw an error, the updater will proceed with the update.
+ Otherwise if an error is thrown (we recommend using an NSError), then the will not proceed with the update.
  
  @param updater The updater instance.
  @param updateItem The selected update item to proceed with.
  @param updateCheck The type of update check that would be performed if proceeded.
- @param error An error object that must be populated by the delegate if the updater should not proceed with the update.
- @return @c YES if the updater should proceed with @p updateItem, otherwise @c NO if the updater should not proceed with the update with an @p error populated.
+ @param error An error object that must be populated by the delegate if the updater should not proceed with the update. The @c NSLocalizedDescriptionKey user info key should be populated indicating a description of the error.
+ @return @c YES if the updater should proceed with @c updateItem, otherwise @c NO if the updater should not proceed with the update with an @c error populated.
  */
 - (BOOL)updater:(SPUUpdater *)updater shouldProceedWithUpdate:(SUAppcastItem *)updateItem updateCheck:(SPUUpdateCheck)updateCheck error:(NSError * __autoreleasing *)error;
 
 /**
- Called when an update is skipped by the user.
+ Called when a user makes a choice to install, dismiss, or skip an update.
+ 
+ If the @c choice is `SPUUserUpdateChoiceDismiss` and @c state.stage is `SPUUserUpdateStageDownloaded` the downloaded update is kept
+ around until the next time Sparkle reminds the user of the update.
+ 
+ If the @c choice is `SPUUserUpdateChoiceDismiss` and  @c state.stage is `SPUUserUpdateStageInstalling` the update is still set to install on application termination.
+ 
+ If the @c choice is `SPUUserUpdateChoiceSkip` the user will not be reminded in the future for this update unless they initiate an update check themselves.
+ 
+ If @c updateItem.isInformationOnlyUpdate is @c YES the @c choice cannot be `SPUUserUpdateChoiceInstall`.
  
  @param updater The updater instance.
- @param item The appcast item corresponding to the update that the user skipped.
+ @param choice The choice (install, dismiss, or skip) the user made for this @c updateItem
+ @param updateItem The appcast item corresponding to the update that the user made a choice on.
+ @param state The current state for the update which includes if the update has already been downloaded or already installing.
  */
-- (void)updater:(SPUUpdater *)updater userDidSkipThisVersion:(SUAppcastItem *)item;
+- (void)updater:(SPUUpdater *)updater userDidMakeChoice:(SPUUserUpdateChoice)choice forUpdate:(SUAppcastItem *)updateItem state:(SPUUserUpdateState *)state;
 
 /**
  Returns whether the release notes (if available) should be downloaded after an update is found and shown.
@@ -265,7 +292,7 @@ SU_EXPORT extern NSString *const SUSystemProfilerPreferredLanguageKey;
 - (void)updater:(SPUUpdater *)updater willDownloadUpdate:(SUAppcastItem *)item withRequest:(NSMutableURLRequest *)request;
 
 /**
- Called immediately after succesfull download of the specified update.
+ Called immediately after successful download of the specified update.
  
  @param updater The SUUpdater instance.
  @param item The appcast item corresponding to the update that has been downloaded.
@@ -324,14 +351,14 @@ SU_EXPORT extern NSString *const SUSystemProfilerPreferredLanguageKey;
  @param item The appcast item corresponding to the update that is proposed to be installed.
  @param installHandler The install handler that must be completed before continuing with the relaunch.
  
- @return @c YES to delay the relaunch until @p installHandler is invoked.
+ @return @c YES to delay the relaunch until @c installHandler is invoked.
  */
 - (BOOL)updater:(SPUUpdater *)updater shouldPostponeRelaunchForUpdate:(SUAppcastItem *)item untilInvokingBlock:(void (^)(void))installHandler;
 
 /**
  Returns whether the application should be relaunched at all.
  
- Some apps @b cannot be relaunched under certain circumstances.
+ Some apps **cannot** be relaunched under certain circumstances.
  This method can be used to explicitly prevent a relaunch.
  
  @param updater The updater instance.
@@ -359,14 +386,14 @@ SU_EXPORT extern NSString *const SUSystemProfilerPreferredLanguageKey;
  @param updater The updater instance.
  @return The custom version comparator or @c nil if you don't want to be delegated this task.
  */
-- (nullable id<SUVersionComparison>)versionComparatorForUpdater:(SPUUpdater *)updater;
+- (nullable id<SUVersionComparison>)versionComparatorForUpdater:(SPUUpdater *)updater __deprecated_msg("Custom version comparators are deprecated because they are incompatible with how the system compares different versions of an app.");
 
 /**
  Called when a background update will be scheduled after a delay.
  
  Automatic update checks need to be enabled for this to trigger.
  
- @param delay The delay in seconds until the next scheduled update will occur.
+ @param delay The delay in seconds until the next scheduled update will occur. This is an approximation and may vary due to system state.
  
  @param updater The updater instance.
  */
@@ -394,16 +421,21 @@ SU_EXPORT extern NSString *const SUSystemProfilerPreferredLanguageKey;
 /**
  Called when an update is scheduled to be silently installed on quit after downloading the update automatically.
  
- If the updater is given responsibility, it can later remind the user an update is available if they have not terminated the application for a long time.
+ If you want to intercept this method without taking control of installing the update, return @c NO.
+ This will let future update cycles to run and allow Sparkle to present the update to the user later if certain conditions are met.
+ For example, critical updates will be presented to the user right away. Other updates may be presented later if the user hasn't terminated the application
+ for a long time (defined by `SUScheduledImpatientCheckInterval`).
  
- Also if the updater is given responsibility and the update item is marked critical, the new update will be presented to the user immediately after.
+ If you want to take control of installing the update, return @c YES.
+ This stalls the current update cycle and prevents future update cycles from running. When the opportunity arrives, you can invoke `immediateInstallHandler` to
+ install the update and relaunch the application without any UI interaction shown.
  
- Even if the @p immediateInstallHandler is not invoked, the installer will attempt to install the update on termination.
+ In either case Sparkle will always attempt to install the update when the app terminates.
  
  @param updater The updater instance.
  @param item The appcast item corresponding to the update that is proposed to be installed.
- @param immediateInstallHandler The install handler to immediately install the update. No UI interaction will be shown and the application will be relaunched after installation.
- @return @c YES if the delegate will handle installing the update or @c NO if the updater should be given responsibility.
+ @param immediateInstallHandler The install handler to immediately install the update and relaunch the application. This handler can only be used if @c YES is returned. For Sparkle 2.3 onwards, this handler can be invoked multiple times in case the application cancels the termination request.
+ @return @c YES if you will handle installing the update using `immediateInstallHandler` or @c NO to allow Sparkle's update scheduler to continue running.
  */
 - (BOOL)updater:(SPUUpdater *)updater willInstallUpdateOnQuit:(SUAppcastItem *)item immediateInstallationBlock:(void (^)(void))immediateInstallHandler;
 
@@ -429,7 +461,7 @@ SU_EXPORT extern NSString *const SUSystemProfilerPreferredLanguageKey;
  
  An update may be scheduled to be installed during the update cycle, or no updates may be found, or an available update may be dismissed or skipped (which is the same as no error).
  
- If the @p error is @c nil, no error has occurred.
+ If the @c error is @c nil, no error has occurred.
  
  Some special possible values of `error.code` are:
  
@@ -445,6 +477,8 @@ SU_EXPORT extern NSString *const SUSystemProfilerPreferredLanguageKey;
 /* Deprecated methods */
 
 - (BOOL)updaterMayCheckForUpdates:(SPUUpdater *)updater __deprecated_msg("Please use -[SPUUpdaterDelegate updater:mayPerformUpdateCheck:error:] instead.");
+
+- (void)updater:(SPUUpdater *)updater userDidSkipThisVersion:(SUAppcastItem *)item __deprecated_msg("Please use -[SPUUpdaterDelegate updater:userDidMakeChoice:forUpdate:state:] instead.");
 
 @end
 

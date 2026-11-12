@@ -14,9 +14,11 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-@interface SUDiskImageUnarchiver : NSObject <SUUnarchiverProtocol>
+SPU_OBJC_DIRECT_MEMBERS @interface SUDiskImageUnarchiver : NSObject <SUUnarchiverProtocol>
 
-- (instancetype)initWithArchivePath:(NSString *)archivePath decryptionPassword:(nullable NSString *)decryptionPassword;
+- (instancetype)initWithArchivePath:(NSString *)archivePath extractionDirectory:(NSString *)extractionDirectory extractionMountDirectory:(nullable NSString *)extractionMountDirectory decryptionPassword:(nullable NSString *)decryptionPassword;
+
++ (BOOL)canUnarchivePath:(NSString *)path;
 
 @end
 

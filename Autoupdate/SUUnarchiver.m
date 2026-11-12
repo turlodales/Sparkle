@@ -18,22 +18,40 @@
 
 @implementation SUUnarchiver
 
-+ (nullable id <SUUnarchiverProtocol>)unarchiverForPath:(NSString *)path updatingHostBundlePath:(nullable NSString *)hostPath decryptionPassword:(nullable NSString *)decryptionPassword expectingInstallationType:(NSString *)installationType
++ (BOOL)canUseExtractionMountDirectory:(NSString *)path
+{
+    if (![SUDiskImageUnarchiver canUnarchivePath:path]) {
+        return NO;
+    }
+
+    // By providing a directory for mounting, this lets the disk image unarchiver use diskutil over hdiutil
+    // diskutil extraction works well across all dmgs only on macOS 27.2+
+    if (@available(macOS 27.2, *)) {
+        return YES;
+    } else {
+        return NO;
+    }
+}
+
++ (nullable id <SUUnarchiverProtocol>)unarchiverForPath:(NSString *)path extractionDirectory:(NSString *)extractionDirectory extractionMountDirectory:(nullable NSString *)extractionMountDirectory updatingHostBundlePath:(nullable NSString *)hostPath decryptionPassword:(nullable NSString *)decryptionPassword expectingInstallationType:(NSString *)installationType
 {
     if ([SUPipedUnarchiver canUnarchivePath:path]) {
-        return [[SUPipedUnarchiver alloc] initWithArchivePath:path];
-        
-    } else if ([SUDiskImageUnarchiver canUnarchivePath:path]) {
-        return [[SUDiskImageUnarchiver alloc] initWithArchivePath:path decryptionPassword:decryptionPassword];
-        
-    } else if ([SUBinaryDeltaUnarchiver canUnarchivePath:path]) {
+        return [[SUPipedUnarchiver alloc] initWithArchivePath:path extractionDirectory:extractionDirectory];
+    }
+    else if ([SUDiskImageUnarchiver canUnarchivePath:path]) {
+        return [[SUDiskImageUnarchiver alloc] initWithArchivePath:path extractionDirectory:extractionDirectory extractionMountDirectory:extractionMountDirectory decryptionPassword:decryptionPassword];
+    }
+    else if ([SUBinaryDeltaUnarchiver canUnarchivePath:path]) {
         assert(hostPath != nil);
         NSString *nonNullHostPath = hostPath;
-        return [[SUBinaryDeltaUnarchiver alloc] initWithArchivePath:path updateHostBundlePath:nonNullHostPath];
-    } else if ([SUFlatPackageUnarchiver canUnarchivePath:path]) {
-        // Flat packages are only supported for guided packaage installs
-        return [[SUFlatPackageUnarchiver alloc] initWithFlatPackagePath:path expectingInstallationType:installationType];
+        return [[SUBinaryDeltaUnarchiver alloc] initWithArchivePath:path extractionDirectory:extractionDirectory updateHostBundlePath:nonNullHostPath];
     }
+#if SPARKLE_BUILD_PACKAGE_SUPPORT
+    else if ([SUFlatPackageUnarchiver canUnarchivePath:path]) {
+        // Flat packages are only supported for guided packaage installs
+        return [[SUFlatPackageUnarchiver alloc] initWithFlatPackagePath:path extractionDirectory:extractionDirectory expectingInstallationType:installationType];
+    }
+#endif
     return nil;
 }
 

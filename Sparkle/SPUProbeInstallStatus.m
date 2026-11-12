@@ -13,6 +13,7 @@
 #import "SPUSecureCoding.h"
 #import "SUInstallerStatus.h"
 #import "SUXPCInstallerStatus.h"
+#import "SUConstants.h"
 #import "SULog.h"
 
 
@@ -26,12 +27,14 @@
 
 + (void)probeInstallerInProgressForHostBundleIdentifier:(NSString *)hostBundleIdentifier completion:(void (^)(BOOL))completionHandler
 {
-    id<SUInstallerStatusProtocol> installerStatus = nil;
-    BOOL usesXPC = SPUXPCServiceExists(@INSTALLER_STATUS_BUNDLE_ID);
-    if (!usesXPC) {
-        installerStatus = [[SUInstallerStatus alloc] init];
-    } else {
+    id<SUInstallerStatusProtocol> installerStatus;
+#if INSTALLER_STATUS_XPC_SERVICE_EMBEDDED
+    if (SPUXPCServiceIsEnabled(SUEnableInstallerStatusServiceKey)) {
         installerStatus = [[SUXPCInstallerStatus alloc] init];
+    } else
+#endif
+    {
+        installerStatus = [[SUInstallerStatus alloc] initWithRemote:NO];
     }
     
     __block BOOL handledCompletion = NO;
@@ -75,11 +78,7 @@
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(PROBE_TIMEOUT * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (!handledCompletion) {
 #pragma clang diagnostic pop
-            if (usesXPC) {
-                SULog(SULogLevelError, @"Timed out while probing installer progress. Please see https://sparkle-project.org/documentation/sandboxing/#testing for potential cause.");
-            } else {
-                SULog(SULogLevelError, @"Timed out while probing installer progress");
-            }
+            SULog(SULogLevelError, @"Timed out while probing installer progress. If your app is sandboxed, please see https://sparkle-project.org/documentation/sandboxing/#testing for the potential cause.");
             completionHandler(NO);
             handledCompletion = YES;
         }
@@ -90,11 +89,13 @@
 + (void)probeInstallerUpdateItemForHostBundleIdentifier:(NSString *)hostBundleIdentifier completion:(void (^)(SPUInstallationInfo  * _Nullable))completionHandler
 {
     id<SUInstallerStatusProtocol> installerStatus = nil;
-    BOOL usesXPC = SPUXPCServiceExists(@INSTALLER_STATUS_BUNDLE_ID);
-    if (!usesXPC) {
-        installerStatus = [[SUInstallerStatus alloc] init];
-    } else {
+#if INSTALLER_STATUS_XPC_SERVICE_EMBEDDED
+    if (SPUXPCServiceIsEnabled(SUEnableInstallerStatusServiceKey)) {
         installerStatus = [[SUXPCInstallerStatus alloc] init];
+    } else
+#endif
+    {
+        installerStatus = [[SUInstallerStatus alloc] initWithRemote:NO];
     }
     
     __block BOOL handledCompletion = NO;
@@ -144,11 +145,7 @@
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(PROBE_TIMEOUT * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (!handledCompletion) {
 #pragma clang diagnostic pop
-            if (usesXPC) {
-                SULog(SULogLevelDefault, @"Timed out while probing installer info data. Please see https://sparkle-project.org/documentation/sandboxing/#testing for potential cause.");
-            } else {
-                SULog(SULogLevelDefault, @"Timed out while probing installer info data");
-            }
+            SULog(SULogLevelDefault, @"Timed out while probing installer info data. If your app is sandboxed, please see https://sparkle-project.org/documentation/sandboxing/#testing for the potential cause.");
             completionHandler(nil);
             handledCompletion = YES;
         }

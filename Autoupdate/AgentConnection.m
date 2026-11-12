@@ -10,26 +10,24 @@
 #import "SPUMessageTypes.h"
 #import "SPUInstallerAgentProtocol.h"
 #import "SUInstallerAgentInitiationProtocol.h"
+#import "SUCodeSigningVerifier.h"
+#import "SULog.h"
 
 
 #include "AppKitPrevention.h"
 
 @interface AgentConnection () <NSXPCListenerDelegate, SUInstallerAgentInitiationProtocol>
 
-@property (nonatomic) NSXPCListener *xpcListener;
-@property (nonatomic, nullable) NSXPCConnection *activeConnection;
-@property (nonatomic, nullable) id<SPUInstallerAgentProtocol> agent;
-@property (nonatomic, weak) id<AgentConnectionDelegate> delegate;
-@property (nonatomic) BOOL connected;
-
 @end
 
 @implementation AgentConnection
+{
+    NSXPCListener *_xpcListener;
+    NSXPCConnection *_activeConnection;
+    __weak id<AgentConnectionDelegate> _delegate;
+}
 
-@synthesize xpcListener = _xpcListener;
-@synthesize activeConnection = _activeConnection;
 @synthesize agent = _agent;
-@synthesize delegate = _delegate;
 @synthesize connected = _connected;
 @synthesize invalidationError = _invalidationError;
 
@@ -48,25 +46,44 @@
 
 - (void)startListener
 {
-    [self.xpcListener resume];
+    [_xpcListener resume];
 }
 
 - (void)invalidate
 {
-    self.delegate = nil;
+    _delegate = nil;
     
-    [self.activeConnection invalidate];
-    self.activeConnection = nil;
+    [_activeConnection invalidate];
+    // Don't need to set _activeConnection to nil, we don't expect new connections
     
-    [self.xpcListener invalidate];
-    self.xpcListener = nil;
+    [_xpcListener invalidate];
+    _xpcListener = nil;
 }
 
 - (BOOL)listener:(NSXPCListener *)__unused listener shouldAcceptNewConnection:(NSXPCConnection *)newConnection
 {
-    if (self.activeConnection != nil) {
+    if (_activeConnection != nil) {
+        SULog(SULogLevelError, @"Error: Rejecting new connection for agent due already having an active connection");
+        
         [newConnection invalidate];
         return NO;
+    }
+    
+    // Hardening but not critical for security
+    NSError *validationError = nil;
+    SUValidateConnectionStatus validationStatus = [SUCodeSigningVerifier validateConnection:newConnection error:&validationError];
+    switch (validationStatus) {
+        case SUValidateConnectionStatusSetCodeSigningRequirementSuccess:
+            break;
+        case SUValidateConnectionStatusSetNoRequirementSuccess:
+            break;
+        case SUValidateConnectionStatusAPIFailure:
+        case SUValidateConnectionStatusCodeSigningRequirementFailure:
+        case SUValidateConectionNoSupportedValidationMethodFailure:
+            SULog(SULogLevelError, @"Error: Rejecting new connection for agent due to failing validation of XPC connection with status %lu and error: %@", validationStatus, validationError.localizedDescription);
+            
+            [newConnection invalidate];
+            return NO;
     }
     
     newConnection.exportedInterface = [NSXPCInterface interfaceWithProtocol:@protocol(SUInstallerAgentInitiationProtocol)];
@@ -74,22 +91,29 @@
     
     newConnection.remoteObjectInterface = [NSXPCInterface interfaceWithProtocol:@protocol(SPUInstallerAgentProtocol)];
     
-    self.activeConnection = newConnection;
+    _activeConnection = newConnection;
     
-    __weak AgentConnection *weakSelf = self;
+    __weak __typeof__(self) weakSelf = self;
     newConnection.interruptionHandler = ^{
-        [weakSelf.activeConnection invalidate];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __typeof__(self) strongSelf = weakSelf;
+            if (strongSelf != nil) {
+                [strongSelf->_activeConnection invalidate];
+            }
+        });
     };
     
     newConnection.invalidationHandler = ^{
         dispatch_async(dispatch_get_main_queue(), ^{
-            [weakSelf.delegate agentConnectionDidInvalidate];
+            __typeof__(self) strongSelf = weakSelf;
+            if (strongSelf != nil) {
+                [strongSelf->_delegate agentConnectionDidInvalidate];
+            }
         });
     };
     
+    _agent = newConnection.remoteObjectProxy;
     [newConnection resume];
-    
-    self.agent = newConnection.remoteObjectProxy;
     
     return YES;
 }
@@ -97,19 +121,20 @@
 - (void)connectionDidInitiateWithReply:(void (^)(void))acknowledgement
 {
     dispatch_async(dispatch_get_main_queue(), ^{
-        self.connected = YES;
+        self->_connected = YES;
         
-        [self.delegate agentConnectionDidInitiate];
-        self.delegate = nil;
+        [self->_delegate agentConnectionDidInitiate];
     });
     
-    acknowledgement();
+    if (acknowledgement != NULL) {
+        acknowledgement();
+    }
 }
 
 - (void)connectionWillInvalidateWithError:(NSError *)error
 {
     dispatch_async(dispatch_get_main_queue(), ^{
-        self.invalidationError = error;
+        self->_invalidationError = error;
     });
 }
 

@@ -6,6 +6,8 @@
 //  Copyright 2010 Dragon Systems Software Limited. All rights reserved.
 //
 
+#if SPARKLE_BUILD_PACKAGE_SUPPORT
+
 #import <sys/stat.h>
 #import "SUGuidedPackageInstaller.h"
 #import "SUErrors.h"
@@ -13,19 +15,12 @@
 
 #include "AppKitPrevention.h"
 
-@interface SUGuidedPackageInstaller ()
-
-@property (nonatomic, readonly, copy) NSString *packagePath;
-@property (nonatomic, readonly, copy) NSString *homeDirectory;
-@property (nonatomic, readonly, copy) NSString *userName;
-
-@end
-
 @implementation SUGuidedPackageInstaller
-
-@synthesize packagePath = _packagePath;
-@synthesize homeDirectory = _homeDirectory;
-@synthesize userName = _userName;
+{
+    NSString *_packagePath;
+    NSString *_homeDirectory;
+    NSString *_userName;
+}
 
 - (instancetype)initWithPackagePath:(NSString *)packagePath homeDirectory:(NSString *)homeDirectory userName:(NSString *)userName
 {
@@ -50,38 +45,43 @@
     
     NSTask *task = [[NSTask alloc] init];
     task.launchPath = installerPath;
-    task.arguments = @[@"-pkg", self.packagePath, @"-target", @"/"];
+    task.arguments = @[@"-pkg", _packagePath, @"-target", @"/"];
     // Set the $HOME and $USER variables so pre/post install scripts reference the correct user environment
-    task.environment = @{@"HOME": self.homeDirectory, @"USER": self.userName};
-    task.standardError = [NSPipe pipe];
-    task.standardOutput = [NSPipe pipe];
+    task.environment = @{@"HOME": _homeDirectory, @"USER": _userName};
+    task.standardError = nil;
+    task.standardOutput = nil;
     
-    BOOL success = YES;
-    @try {
-        [task launch];
-        [task waitUntilExit];
-        if (task.terminationStatus != EXIT_SUCCESS) {
-            success = NO;
-            if (error != NULL) {
-                *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUInstallationError userInfo:@{ NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Guided package installer returned non-zero exit status (%d)", task.terminationStatus] }];
-            }
-        }
-    } @catch (NSException *) {
-        success = NO;
+    NSError *launchError = nil;
+    if (![task launchAndReturnError:&launchError]) {
         if (error != NULL) {
-            *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUInstallationError userInfo:@{ NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Guided package installer task threw an exception"] }];
+            NSMutableDictionary *userInfo = [NSMutableDictionary dictionaryWithDictionary:@{ NSLocalizedDescriptionKey: @"Guided package installer failed to launch" }];
+            
+            if (launchError != nil) {
+                userInfo[NSUnderlyingErrorKey] = launchError;
+            }
+            
+            *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUInstallationError userInfo:userInfo];
         }
+        return NO;
     }
-    return success;
+    
+    [task waitUntilExit];
+    
+    if (task.terminationStatus != EXIT_SUCCESS) {
+        if (error != NULL) {
+            *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUInstallationError userInfo:@{ NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Guided package installer returned non-zero exit status (%d)", task.terminationStatus] }];
+        }
+        
+        return NO;
+    }
+    
+    return YES;
 }
 
 - (void)performCleanup
 {
 }
 
-- (BOOL)canInstallSilently
-{
-    return YES;
-}
-
 @end
+
+#endif

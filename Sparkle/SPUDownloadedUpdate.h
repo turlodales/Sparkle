@@ -7,16 +7,20 @@
 //
 
 #import <Foundation/Foundation.h>
-#import "SPUResumableUpdate.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
-@interface SPUDownloadedUpdate : NSObject <SPUResumableUpdate>
+@class SUAppcastItem;
 
-- (instancetype)initWithAppcastItem:(SUAppcastItem *)updateItem secondaryAppcastItem:(SUAppcastItem * _Nullable)secondaryItem downloadName:(NSString *)downloadName temporaryDirectory:(NSString *)temporaryDirectory;
+SPU_OBJC_DIRECT_MEMBERS @interface SPUDownloadedUpdate : NSObject
 
-@property (nonatomic, copy, readonly) NSString *downloadName;
-@property (nonatomic, copy, readonly) NSString *temporaryDirectory;
+- (instancetype)initWithAppcastItem:(SUAppcastItem *)updateItem secondaryAppcastItem:(SUAppcastItem * _Nullable)secondaryItem downloadBookmarkData:(NSData *)downloadBookmarkData downloadToken:(NSString *)downloadToken;
+
+@property (nonatomic, readonly) SUAppcastItem *updateItem;
+@property (nonatomic, readonly, nullable) SUAppcastItem *secondaryUpdateItem;
+
+@property (nonatomic, readonly) NSData *downloadBookmarkData;
+@property (nonatomic, readonly) NSString *downloadToken;
 
 @end
 

@@ -6,16 +6,9 @@
 //  Copyright © 2016 Sparkle Project. All rights reserved.
 //
 
-#if __has_feature(modules)
-#if __has_warning("-Watimport-in-framework-header")
-#pragma clang diagnostic ignored "-Watimport-in-framework-header"
-#endif
-@import Foundation;
-#else
 #import <Foundation/Foundation.h>
-#endif
 
-#ifdef BUILDING_SPARKLE_DOWNLOADER_SERVICE
+#if defined(BUILDING_SPARKLE_SOURCES_EXTERNALLY)
 // Ignore incorrect warning
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wquoted-include-in-framework-header"
@@ -30,7 +23,7 @@ NS_ASSUME_NONNULL_BEGIN
 /**
  * A class for containing downloaded data along with some information about it.
  */
-SU_EXPORT @interface SPUDownloadData : NSObject <NSSecureCoding>
+SU_EXPORT NS_SWIFT_SENDABLE @interface SPUDownloadData : NSObject <NSSecureCoding>
 
 /**
  * The raw data that was downloaded.

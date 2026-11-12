@@ -33,6 +33,10 @@ extension FileHandle {
 
         CC_SHA256_Final(hash.baseAddress, &context)
 
+        defer {
+            hash.deallocate()
+        }
+        
         return hash.reduce("") { $0 + String(format: "%02x", $1) }
     }
 
@@ -40,7 +44,7 @@ extension FileHandle {
 
 extension URL {
 
-    /// Calculates the SHA-256 hash of the file referened by the URL.
+    /// Calculates the SHA-256 hash of the file referenced by the URL.
     ///
     /// - Returns: The SHA-256 hash of the file (as a hexadecimal string), or `nil` if
     ///   the URL doesn't point to a file.

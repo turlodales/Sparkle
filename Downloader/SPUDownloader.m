@@ -9,7 +9,6 @@
 #import "SPUDownloader.h"
 #import "SPUDownloaderDelegate.h"
 #import "SPULocalCacheDirectory.h"
-#import "SPUURLRequest.h"
 #import "SPUDownloadData.h"
 #import "SPUDownloadDataPrivate.h"
 #import "SUErrors.h"
@@ -26,31 +25,23 @@ typedef NS_ENUM(NSUInteger, SPUDownloadMode)
 static NSString *SUDownloadingReason = @"Downloading update related file";
 
 @interface SPUDownloader () <NSURLSessionDownloadDelegate>
-
-// Delegate is intentionally strongly referenced; see header
-@property (nonatomic) id <SPUDownloaderDelegate> delegate;
-@property (nonatomic) NSURLSessionDownloadTask *download;
-@property (nonatomic) NSURLSession *downloadSession;
-@property (nonatomic, copy) NSString *bundleIdentifier;
-@property (nonatomic, copy) NSString *desiredFilename;
-@property (nonatomic, copy) NSString *downloadFilename;
-@property (nonatomic) BOOL disabledAutomaticTermination;
-@property (nonatomic) SPUDownloadMode mode;
-@property (nonatomic) BOOL receivedExpectedBytes;
-
 @end
 
 @implementation SPUDownloader
-
-@synthesize delegate = _delegate;
-@synthesize download = _download;
-@synthesize downloadSession = _downloadSession;
-@synthesize bundleIdentifier = _bundleIdentifier;
-@synthesize desiredFilename = _desiredFilename;
-@synthesize downloadFilename = _downloadFilename;
-@synthesize disabledAutomaticTermination = _disabledAutomaticTermination;
-@synthesize mode = _mode;
-@synthesize receivedExpectedBytes = _receivedExpectedBytes;
+{
+    NSURLSessionTask *_sessionTask;
+    NSURLSession *_downloadSession;
+    NSString *_bundleIdentifier;
+    NSString *_desiredFilename;
+    
+    // Delegate is intentionally strongly referenced; see header
+    id <SPUDownloaderDelegate> _delegate;
+    
+    SPUDownloadMode _mode;
+    
+    BOOL _disabledAutomaticTermination;
+    BOOL _receivedExpectedBytes;
+}
 
 - (instancetype)initWithDelegate:(id <SPUDownloaderDelegate>)delegate
 {
@@ -61,93 +52,129 @@ static NSString *SUDownloadingReason = @"Downloading update related file";
     return self;
 }
 
-- (void)startDownloadWithRequest:(SPUURLRequest *)request
+- (void)startDownloadWithRequest:(NSURLRequest *)request SPU_OBJC_DIRECT
 {
-    self.downloadSession = [NSURLSession
+    if (request == nil) {
+        NSString *message = @"The download request must not be nil";
+        NSError *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUDownloadError userInfo:@{ NSLocalizedDescriptionKey: message }];
+        [_delegate downloaderDidFailWithError:error];
+        
+        return;
+    }
+    
+    // Prevent any unwanted URL schemes (e.g. file://)
+    NSString *scheme = request.URL.scheme;
+    if (scheme == nil) {
+        NSString *message = @"The download request scheme must not be nil";
+        NSError *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUDownloadError userInfo:@{ NSLocalizedDescriptionKey: message }];
+        [_delegate downloaderDidFailWithError:error];
+        
+        return;
+    }
+    
+    if ([scheme caseInsensitiveCompare:@"http"] != NSOrderedSame && [scheme caseInsensitiveCompare:@"https"] != NSOrderedSame) {
+        NSString *message = [NSString stringWithFormat:@"The download request URL must use http or https (%@)", request.URL];
+        NSError *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUDownloadError userInfo:@{ NSLocalizedDescriptionKey: message }];
+        [_delegate downloaderDidFailWithError:error];
+        
+        return;
+    }
+    
+    _downloadSession = [NSURLSession
         sessionWithConfiguration:[NSURLSessionConfiguration defaultSessionConfiguration]
         delegate:self
         delegateQueue:[NSOperationQueue mainQueue]];
-    self.download = [self.downloadSession downloadTaskWithRequest:request.request];
-    [self.download resume];
+    
+    switch (_mode) {
+        case SPUDownloadModePersistent:
+            _sessionTask = [_downloadSession downloadTaskWithRequest:request];
+            break;
+        case SPUDownloadModeTemporary: {
+            __weak __typeof__(self) weakSelf = self;
+            _sessionTask = [_downloadSession dataTaskWithRequest:request completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
+                [weakSelf temporaryDownloadDidFinishWithData:data response:response error:error];
+            }];
+            break;
+        }
+    }
+    
+    [_sessionTask resume];
 }
 
 // Don't implement dealloc - make the client call cleanup, which is the only way to remove the reference cycle from the delegate anyway
 
-- (void)startPersistentDownloadWithRequest:(SPUURLRequest *)request bundleIdentifier:(NSString *)bundleIdentifier desiredFilename:(NSString *)desiredFilename
+- (void)startPersistentDownloadWithRequest:(NSURLRequest *)request bundleIdentifier:(NSString *)bundleIdentifier desiredFilename:(NSString *)desiredFilename
 {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (self.download == nil && self.delegate != nil) {
+        if (self->_sessionTask == nil && self->_delegate != nil) {
             // Prevent service from automatically terminating while downloading the update asynchronously without any reply blocks
             [[NSProcessInfo processInfo] disableAutomaticTermination:SUDownloadingReason];
-            self.disabledAutomaticTermination = YES;
+            self->_disabledAutomaticTermination = YES;
             
-            self.mode = SPUDownloadModePersistent;
-            self.desiredFilename = desiredFilename;
-            self.bundleIdentifier = bundleIdentifier;
+            self->_mode = SPUDownloadModePersistent;
+            self->_desiredFilename = desiredFilename;
+            self->_bundleIdentifier = [bundleIdentifier copy];
             
             [self startDownloadWithRequest:request];
         }
     });
 }
 
-- (void)startTemporaryDownloadWithRequest:(SPUURLRequest *)request
+- (void)startTemporaryDownloadWithRequest:(NSURLRequest *)request
 {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (self.download == nil && self.delegate != nil) {
+        if (self->_sessionTask == nil && self->_delegate != nil) {
             // Prevent service from automatically terminating while downloading the update asynchronously without any reply blocks
             [[NSProcessInfo processInfo] disableAutomaticTermination:SUDownloadingReason];
-            self.disabledAutomaticTermination = YES;
+            self->_disabledAutomaticTermination = YES;
             
-            self.mode = SPUDownloadModeTemporary;
+            self->_mode = SPUDownloadModeTemporary;
             [self startDownloadWithRequest:request];
         }
     });
 }
 
-- (void)enableAutomaticTermination
+- (void)enableAutomaticTermination SPU_OBJC_DIRECT
 {
-    if (self.disabledAutomaticTermination) {
+    if (_disabledAutomaticTermination) {
         [[NSProcessInfo processInfo] enableAutomaticTermination:SUDownloadingReason];
-        self.disabledAutomaticTermination = NO;
+        _disabledAutomaticTermination = NO;
     }
 }
 
-- (NSString *)rootPersistentDownloadCachePathForBundleIdentifier:(NSString *)bundleIdentifier
+- (NSString *)rootPersistentDownloadCachePathForBundleIdentifier:(NSString *)bundleIdentifier SPU_OBJC_DIRECT
 {
+    // Note: The installer verifies this "PersistentDownloads" path component
     return [[SPULocalCacheDirectory cachePathForBundleIdentifier:bundleIdentifier] stringByAppendingPathComponent:@"PersistentDownloads"];
 }
 
-- (void)removeDownloadDirectory:(NSString *)directoryName bundleIdentifier:(NSString *)bundleIdentifier
+- (void)removeDownloadDirectoryWithDownloadToken:(NSString *)downloadToken bundleIdentifier:(NSString *)bundleIdentifier
 {
-    // Only take the directory name and compute most of the base path ourselves
+    // Only take the directory name (from the download token) and compute most of the base path ourselves
     // This way we do not have to send/trust an absolute path
     // The downloader instance that creates this temp directory isn't necessarily the same as the one
     // that clears it (eg upon skipping an already downloaded update), so we can't just preserve it here too
     dispatch_async(dispatch_get_main_queue(), ^{
-        NSString *rootPersistentDownloadCachePath = [self rootPersistentDownloadCachePathForBundleIdentifier:bundleIdentifier];
-        if (rootPersistentDownloadCachePath != nil) {
-            NSString *sanitizedDirectoryName = directoryName.lastPathComponent;
-            NSString *tempDir = [rootPersistentDownloadCachePath stringByAppendingPathComponent:sanitizedDirectoryName];
-            
-            [[NSFileManager defaultManager] removeItemAtPath:tempDir error:NULL];
+        if (bundleIdentifier != nil && downloadToken != nil) {
+            NSString *rootPersistentDownloadCachePath = [self rootPersistentDownloadCachePathForBundleIdentifier:bundleIdentifier];
+            if (rootPersistentDownloadCachePath != nil) {
+                NSString *sanitizedDownloadToken = downloadToken.lastPathComponent;
+                NSString *tempDir = [rootPersistentDownloadCachePath stringByAppendingPathComponent:sanitizedDownloadToken];
+                
+                [[NSFileManager defaultManager] removeItemAtPath:tempDir error:NULL];
+            }
         }
     });
 }
 
-- (void)_cleanup
+- (void)_cleanup SPU_OBJC_DIRECT
 {
     [self enableAutomaticTermination];
-    [self.download cancel];
-    [self.downloadSession finishTasksAndInvalidate];
-    self.download = nil;
-    self.downloadSession = nil;
-    self.delegate = nil;
-    
-    if (self.mode == SPUDownloadModeTemporary && self.downloadFilename != nil)
-    {
-        [[NSFileManager defaultManager] removeItemAtPath:self.downloadFilename error:NULL];
-        self.downloadFilename = nil;
-    }
+    [_sessionTask cancel];
+    [_downloadSession finishTasksAndInvalidate];
+    _sessionTask = nil;
+    _downloadSession = nil;
+    _delegate = nil;
 }
 
 - (void)cleanup:(void (^)(void))completionHandler
@@ -155,58 +182,125 @@ static NSString *SUDownloadingReason = @"Downloading update related file";
     dispatch_async(dispatch_get_main_queue(), ^{
         [self _cleanup];
         
-        completionHandler();
+        if (completionHandler != NULL) {
+            completionHandler();
+        }
     });
 }
 
-- (void)URLSession:(NSURLSession *)__unused session downloadTask:(NSURLSessionDownloadTask *)__unused downloadTask didFinishDownloadingToURL:(NSURL *)location
+static bool SPUValidateStatusCodeAndFailIfInvalid(NSURLResponse * _Nullable response, NSURL *url, id<SPUDownloaderDelegate> delegate)
 {
-    if (self.mode == SPUDownloadModeTemporary)
+    NSInteger statusCode = [response isKindOfClass:[NSHTTPURLResponse class]] ? ((NSHTTPURLResponse *)response).statusCode : 200;
+    
+    if ((statusCode < 200) || (statusCode >= 400))
     {
-        self.downloadFilename = location.path;
-        [self downloadDidFinish]; // file is already in a system temp dir
-    }
-    else
-    {
-        // Remove our old caches path so we don't start accumulating files in there
-        NSString *rootPersistentDownloadCachePath = [self rootPersistentDownloadCachePathForBundleIdentifier:self.bundleIdentifier];
-
-        [SPULocalCacheDirectory removeOldItemsInDirectory:rootPersistentDownloadCachePath];
+        NSString *message = [NSString stringWithFormat:@"A network error occurred while downloading %@. %@ (%ld)", url.absoluteString, [NSHTTPURLResponse localizedStringForStatusCode:statusCode], (long)statusCode];
+        NSError *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUDownloadError userInfo:@{ NSLocalizedDescriptionKey: message }];
+        [delegate downloaderDidFailWithError:error];
         
-        NSString *tempDir = [SPULocalCacheDirectory createUniqueDirectoryInDirectory:rootPersistentDownloadCachePath];
-        if (tempDir == nil)
-        {
-            // Okay, something's really broken with this user's file structure.
-            [self.download cancel];
-            self.download = nil;
+        return false;
+    } else {
+        return true;
+    }
+}
+
+- (void)temporaryDownloadDidFinishWithData:(NSData * _Nullable)data response:(NSURLResponse * _Nullable)response error:(NSError * _Nullable)error SPU_OBJC_DIRECT
+{
+    if (!SPUValidateStatusCodeAndFailIfInvalid(response, _sessionTask.originalRequest.URL, _delegate)) {
+        return;
+    }
+    
+    SPUDownloadData *downloadData = nil;
+    if (data != nil) {
+        NSURL *responseURL = response.URL;
+        if (responseURL == nil) {
+            responseURL = _sessionTask.currentRequest.URL;
+        }
+        if (responseURL == nil) {
+            responseURL = _sessionTask.originalRequest.URL;
+        }
+        assert(responseURL != nil);
+
+        downloadData = [[SPUDownloadData alloc] initWithData:(NSData * _Nonnull)data URL:responseURL textEncodingName:response.textEncodingName MIMEType:response.MIMEType];
+    }
+    
+    _sessionTask = nil;
+    
+    if (downloadData != nil) {
+        [_delegate downloaderDidFinishWithTemporaryDownloadData:downloadData];
+    } else {
+        NSMutableDictionary *userInfo = [@{NSLocalizedDescriptionKey: @"Failed to download temporary data."} mutableCopy];
+        
+        if (error != nil) {
+            userInfo[NSUnderlyingErrorKey] = error;
+        }
+        
+        [_delegate downloaderDidFailWithError:[NSError errorWithDomain:SUSparkleErrorDomain code:SUDownloadError userInfo:userInfo]];
+    }
+    
+    [self _cleanup];
+}
+
+- (void)URLSession:(NSURLSession *)__unused session downloadTask:(NSURLSessionDownloadTask *)downloadTask didFinishDownloadingToURL:(NSURL *)location
+{
+    if (!SPUValidateStatusCodeAndFailIfInvalid(downloadTask.response, downloadTask.originalRequest.URL, _delegate)) {
+        return;
+    }
+    
+    // Remove our old caches path so we don't start accumulating files in there
+    NSString *rootPersistentDownloadCachePath = [self rootPersistentDownloadCachePathForBundleIdentifier:_bundleIdentifier];
+
+    [SPULocalCacheDirectory removeOldItemsInDirectory:rootPersistentDownloadCachePath];
+    
+    NSString *tempDir = [SPULocalCacheDirectory createUniqueDirectoryInDirectory:rootPersistentDownloadCachePath];
+    if (tempDir == nil)
+    {
+        // Okay, something's really broken with this user's file structure.
+        [_sessionTask cancel];
+        _sessionTask = nil;
+        
+        NSError *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUTemporaryDirectoryError userInfo:@{ NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Can't make a temporary directory for the update download at %@.", tempDir] }];
+        
+        [_delegate downloaderDidFailWithError:error];
+    } else {
+        NSString *downloadFileName = _desiredFilename;
+        NSString *downloadFileNameDirectory = [tempDir stringByAppendingPathComponent:downloadFileName];
+        
+        NSError *createError = nil;
+        if (![[NSFileManager defaultManager] createDirectoryAtPath:downloadFileNameDirectory withIntermediateDirectories:NO attributes:nil error:&createError]) {
+            NSError *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUTemporaryDirectoryError userInfo:@{ NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Can't make a download file name %@ directory inside temporary directory for the update download at %@.", downloadFileName, downloadFileNameDirectory] }];
             
-            NSError *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUTemporaryDirectoryError userInfo:@{ NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Can't make a temporary directory for the update download at %@.", tempDir] }];
-            
-            [self.delegate downloaderDidFailWithError:error];
+            [_delegate downloaderDidFailWithError:error];
         } else {
-            NSString *downloadFileName = self.desiredFilename;
-            NSString *downloadFileNameDirectory = [tempDir stringByAppendingPathComponent:downloadFileName];
-            
-            NSError *createError = nil;
-            if (![[NSFileManager defaultManager] createDirectoryAtPath:downloadFileNameDirectory withIntermediateDirectories:NO attributes:nil error:&createError]) {
-                NSError *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUTemporaryDirectoryError userInfo:@{ NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Can't make a download file name %@ directory inside temporary directory for the update download at %@.", downloadFileName, downloadFileNameDirectory] }];
+            NSString *name = _sessionTask.response.suggestedFilename;
+            if (!name) {
+                name = location.lastPathComponent; // This likely contains nothing useful to identify the file (e.g. CFNetworkDownload_87LVIz.tmp)
+            }
+            NSString *toPath = [downloadFileNameDirectory stringByAppendingPathComponent:name];
+            NSString *fromPath = location.path; // suppress moveItemAtPath: non-null warning
+            NSError *error = nil;
+            if ([[NSFileManager defaultManager] moveItemAtPath:fromPath toPath:toPath error:&error]) {
+                // Create a bookmark for the download
+                // Don't pass any options (we don't want a persistent security scoped bookmark)
                 
-                [self.delegate downloaderDidFailWithError:error];
-            } else {
-                NSString *name = self.download.response.suggestedFilename;
-                if (!name) {
-                    name = location.lastPathComponent; // This likely contains nothing useful to identify the file (e.g. CFNetworkDownload_87LVIz.tmp)
-                }
-                NSString *toPath = [downloadFileNameDirectory stringByAppendingPathComponent:name];
-                NSString *fromPath = location.path; // suppress moveItemAtPath: non-null warning
-                NSError *error = nil;
-                if ([[NSFileManager defaultManager] moveItemAtPath:fromPath toPath:toPath error:&error]) {
-                    self.downloadFilename = toPath;
-                    [self.delegate downloaderDidSetDestinationName:name temporaryDirectory:downloadFileNameDirectory];
-                    [self downloadDidFinish];
+                NSURL *downloadURL = [NSURL fileURLWithPath:toPath isDirectory:NO];
+                
+                NSError *bookmarkError = nil;
+                NSData *bookmarkData = [downloadURL bookmarkDataWithOptions:(NSURLBookmarkCreationOptions)0 includingResourceValuesForKeys:@[] relativeToURL:nil error:&bookmarkError];
+                if (bookmarkData == nil) {
+                    [_delegate downloaderDidFailWithError:bookmarkError];
                 } else {
-                    [self.delegate downloaderDidFailWithError:error];
+                    // The download token may be provided later to the downloader for removing a download
+                    // and its temporary directory
+                    NSString *downloadToken = tempDir.lastPathComponent;
+                    [_delegate downloaderDidSetDownloadBookmarkData:bookmarkData downloadToken:downloadToken];
+                    
+                    _sessionTask = nil;
+                    
+                    [_delegate downloaderDidFinishWithTemporaryDownloadData:nil];
                 }
+            } else {
+                [_delegate downloaderDidFailWithError:error];
             }
         }
     }
@@ -214,68 +308,26 @@ static NSString *SUDownloadingReason = @"Downloading update related file";
 
 - (void)URLSession:(NSURLSession *)__unused session downloadTask:(NSURLSessionDownloadTask *)__unused downloadTask didWriteData:(int64_t)bytesWritten totalBytesWritten:(int64_t)__unused totalBytesWritten totalBytesExpectedToWrite:(int64_t)totalBytesExpectedToWrite
 {
-        
-    if (self.mode == SPUDownloadModePersistent && totalBytesExpectedToWrite > 0 && !self.receivedExpectedBytes) {
-        self.receivedExpectedBytes = YES;
-        [self.delegate downloaderDidReceiveExpectedContentLength:totalBytesExpectedToWrite];
+    if (_mode != SPUDownloadModePersistent) {
+        return;
     }
     
-    if (self.mode == SPUDownloadModePersistent && bytesWritten >= 0) {
-        [self.delegate downloaderDidReceiveDataOfLength:(uint64_t)bytesWritten];
-    }
-}
-
-- (void)downloadDidFinish
-{
-    assert(self.downloadFilename != nil);
-    
-    SPUDownloadData *downloadData = nil;
-    if (self.mode == SPUDownloadModeTemporary) {
-        NSData *data = [NSData dataWithContentsOfFile:self.downloadFilename];
-        if (data != nil) {
-            NSURLResponse *response = self.download.response;
-            assert(response != nil);
-
-            NSURL *responseURL = response.URL;
-            if (responseURL == nil) {
-                responseURL = self.download.currentRequest.URL;
-            }
-            if (responseURL == nil) {
-                responseURL = self.download.originalRequest.URL;
-            }
-            assert(responseURL != nil);
-
-            downloadData = [[SPUDownloadData alloc] initWithData:data URL:responseURL textEncodingName:response.textEncodingName MIMEType:response.MIMEType];
-        }
+    if (!_receivedExpectedBytes) {
+        _receivedExpectedBytes = YES;
+        [_delegate downloaderDidReceiveExpectedContentLength:(totalBytesExpectedToWrite != NSURLSessionTransferSizeUnknown) ? totalBytesExpectedToWrite : 0];
     }
     
-    self.download = nil;
-    
-    switch (self.mode) {
-        case SPUDownloadModeTemporary:
-            if (downloadData != nil) {
-                [self.delegate downloaderDidFinishWithTemporaryDownloadData:downloadData];
-            } else {
-                [self.delegate downloaderDidFailWithError:[NSError errorWithDomain:SUSparkleErrorDomain code:SUDownloadError userInfo:@{ NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Failed to read temporary downloaded data from %@", self.downloadFilename]}]];
-            }
-            
-            [self _cleanup];
-            break;
-        case SPUDownloadModePersistent:
-            [self.delegate downloaderDidFinishWithTemporaryDownloadData:nil];
-            break;
+    if (bytesWritten >= 0) {
+        [_delegate downloaderDidReceiveDataOfLength:(uint64_t)bytesWritten];
     }
 }
 
 - (void)URLSession:(NSURLSession *)__unused session task:(NSURLSessionTask *)__unused task didCompleteWithError:(NSError *)error
 {
-    self.download = nil;
+    _sessionTask = nil;
     if (error != nil) {
-        [self.delegate downloaderDidFailWithError:error];
+        [_delegate downloaderDidFailWithError:error];
     }
 }
-
-// NSURLDownload has a [downlaod:shouldDecodeSourceDataOfMIMEType:] to determine if the data should be decoded.
-// This does not exist for NSURLSessionDownloadTask and appears unnecessary. Data tasks will decode data, but not download tasks.
 
 @end

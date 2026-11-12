@@ -10,10 +10,21 @@ import XCTest
 
 class SUUnarchiverTest: XCTestCase
 {
-    func unarchiveTestAppWithExtension(_ archiveExtension: String, password: String? = nil, resourceName: String = "SparkleTestCodeSignApp", expectingInstallationType installationType: String = SPUInstallationTypeApplication, expectingSuccess: Bool = true) {
+    func unarchiveTestAppWithExtension(_ archiveExtension: String, password: String? = nil, resourceName: String = "SparkleTestCodeSignApp", extractedAppName: String = "SparkleTestCodeSignApp", expectingInstallationType installationType: String = SPUInstallationTypeApplication, expectingSuccess: Bool = true) {
         let appName = resourceName
         let archiveResourceURL = Bundle(for: type(of: self)).url(forResource: appName, withExtension: archiveExtension)!
 
+        // When an extraction mount directory is supported, test both providing one and not providing one,
+        // so that the disk image unarchiver's diskutil and hdiutil code paths are both exercised
+        let extractionMountDirectoryOptions = SUUnarchiver.canUseExtractionMountDirectory(archiveResourceURL.path) ? [true, false] : [false]
+
+        for providingExtractionMountDirectory in extractionMountDirectoryOptions {
+            self.unarchiveTestAppWithExtension(archiveExtension, archiveResourceURL: archiveResourceURL, password: password, providingExtractionMountDirectory: providingExtractionMountDirectory, expectingInstallationType: installationType, expectingSuccess: expectingSuccess, extractedAppName: extractedAppName)
+        }
+    }
+
+    // swiftlint:disable function_parameter_count
+    func unarchiveTestAppWithExtension(_ archiveExtension: String, archiveResourceURL: URL, password: String?, providingExtractionMountDirectory: Bool, expectingInstallationType installationType: String, expectingSuccess: Bool, extractedAppName: String) {
         let fileManager = FileManager.default
 
         // Do not remove this temporary directory
@@ -21,41 +32,48 @@ class SUUnarchiverTest: XCTestCase
         // after *both* our unarchive success and failure calls below finish (they both have async completion blocks inside their implementation)
         let tempDirectoryURL = try! fileManager.url(for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: URL(fileURLWithPath: NSHomeDirectory()), create: true)
 
-        let unarchivedSuccessExpectation = super.expectation(description: "Unarchived Success (format: \(archiveExtension))")
-        let unarchivedFailureExpectation = super.expectation(description: "Unarchived Failure (format: \(archiveExtension))")
+        let unarchivedSuccessExpectation = super.expectation(description: "Unarchived Success (format: \(archiveExtension), mount directory: \(providingExtractionMountDirectory))")
+        let unarchivedFailureExpectation = super.expectation(description: "Unarchived Failure (format: \(archiveExtension), mount directory: \(providingExtractionMountDirectory))")
 
-        let tempArchiveURL = tempDirectoryURL.appendingPathComponent(archiveResourceURL.lastPathComponent)
-        let extractedAppURL = tempDirectoryURL.appendingPathComponent(appName).appendingPathExtension("app")
-
-        self.unarchiveTestAppWithExtension(archiveExtension, appName: appName, tempDirectoryURL: tempDirectoryURL, tempArchiveURL: tempArchiveURL, archiveResourceURL: archiveResourceURL, password: password, expectingInstallationType: installationType, expectingSuccess: expectingSuccess, testExpectation: unarchivedSuccessExpectation)
-        self.unarchiveNonExistentFileTestFailureAppWithExtension(archiveExtension, tempDirectoryURL: tempDirectoryURL, password: password, expectingInstallationType: installationType, testExpectation: unarchivedFailureExpectation)
+        self.unarchiveTestAppWithExtension(archiveExtension, tempDirectoryURL: tempDirectoryURL, archiveResourceURL: archiveResourceURL, password: password, providingExtractionMountDirectory: providingExtractionMountDirectory, expectingInstallationType: installationType, expectingSuccess: expectingSuccess, testExpectation: unarchivedSuccessExpectation)
+        self.unarchiveNonExistentFileTestFailureAppWithExtension(archiveExtension, tempDirectoryURL: tempDirectoryURL, password: password, providingExtractionMountDirectory: providingExtractionMountDirectory, expectingInstallationType: installationType, testExpectation: unarchivedFailureExpectation)
 
         super.waitForExpectations(timeout: 30.0, handler: nil)
 
-        if !archiveExtension.hasSuffix("pkg") {
-            XCTAssertTrue(fileManager.fileExists(atPath: extractedAppURL.path))
-            XCTAssertEqual("6a60ab31430cfca8fb499a884f4a29f73e59b472", hashOfTree(extractedAppURL.path))
+        if expectingSuccess {
+            if installationType == SPUInstallationTypeApplication {
+                let extractedAppURL = tempDirectoryURL.appendingPathComponent(extractedAppName).appendingPathExtension("app")
+                
+                XCTAssertTrue(fileManager.fileExists(atPath: extractedAppURL.path))
+                XCTAssertEqual("6a60ab31430cfca8fb499a884f4a29f73e59b472", hashOfTreeWithVersion(extractedAppURL.path, 3))
+                XCTAssertEqual("52111bc200000000000000000000000000000000", hashOfTree(extractedAppURL.path))
+            } else if archiveExtension != "pkg" {
+                let extractedPackageURL = tempDirectoryURL.appendingPathComponent(extractedAppName).appendingPathExtension("pkg")
+                XCTAssertTrue(fileManager.fileExists(atPath: extractedPackageURL.path))
+            }
         }
     }
 
-    func unarchiveNonExistentFileTestFailureAppWithExtension(_ archiveExtension: String, tempDirectoryURL: URL, password: String?, expectingInstallationType installationType: String, testExpectation: XCTestExpectation) {
-        let tempArchiveURL = tempDirectoryURL.appendingPathComponent("error-invalid").appendingPathExtension(archiveExtension)
-        let unarchiver = SUUnarchiver.unarchiver(forPath: tempArchiveURL.path, updatingHostBundlePath: nil, decryptionPassword: password, expectingInstallationType: installationType)!
+    func unarchiveNonExistentFileTestFailureAppWithExtension(_ archiveExtension: String, tempDirectoryURL: URL, password: String?, providingExtractionMountDirectory: Bool, expectingInstallationType installationType: String, testExpectation: XCTestExpectation) {
+        let tempArchiveURL = tempDirectoryURL.deletingLastPathComponent().appendingPathComponent("error-invalid").appendingPathExtension(archiveExtension)
+
+        // The disk image unarchiver will create and remove this directory automatically
+        let extractionMountDirectory: String? = providingExtractionMountDirectory ? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true).appendingPathComponent(ProcessInfo.processInfo.globallyUniqueString).path : nil
+
+        let unarchiver = SUUnarchiver.unarchiver(forPath: tempArchiveURL.path, extractionDirectory: tempDirectoryURL.path, extractionMountDirectory: extractionMountDirectory, updatingHostBundlePath: nil, decryptionPassword: password, expectingInstallationType: installationType)!
 
         unarchiver.unarchive(completionBlock: {(error: Error?) -> Void in
             XCTAssertNotNil(error)
             testExpectation.fulfill()
-        }, progressBlock: nil)
+        }, progressBlock: nil, waitForCleanup: true)
     }
 
-    // swiftlint:disable function_parameter_count
-    func unarchiveTestAppWithExtension(_ archiveExtension: String, appName: String, tempDirectoryURL: URL, tempArchiveURL: URL, archiveResourceURL: URL, password: String?, expectingInstallationType installationType: String, expectingSuccess: Bool, testExpectation: XCTestExpectation) {
+    func unarchiveTestAppWithExtension(_ archiveExtension: String, tempDirectoryURL: URL, archiveResourceURL: URL, password: String?, providingExtractionMountDirectory: Bool, expectingInstallationType installationType: String, expectingSuccess: Bool, testExpectation: XCTestExpectation) {
 
-        let fileManager = FileManager.default
+        // The disk image unarchiver will create and remove this directory automatically
+        let extractionMountDirectory: String? = providingExtractionMountDirectory ? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true).appendingPathComponent(ProcessInfo.processInfo.globallyUniqueString).path : nil
 
-        try! fileManager.copyItem(at: archiveResourceURL, to: tempArchiveURL)
-
-        let unarchiver = SUUnarchiver.unarchiver(forPath: tempArchiveURL.path, updatingHostBundlePath: nil, decryptionPassword: password, expectingInstallationType: installationType)!
+        let unarchiver = SUUnarchiver.unarchiver(forPath: archiveResourceURL.path, extractionDirectory: tempDirectoryURL.path, extractionMountDirectory: extractionMountDirectory, updatingHostBundlePath: nil, decryptionPassword: password, expectingInstallationType: installationType)!
 
         unarchiver.unarchive(completionBlock: {(error: Error?) -> Void in
             if expectingSuccess {
@@ -64,12 +82,35 @@ class SUUnarchiverTest: XCTestCase
                 XCTAssertNotNil(error)
             }
             testExpectation.fulfill()
-        }, progressBlock: nil)
+        }, progressBlock: nil, waitForCleanup: true)
     }
 
     func testUnarchivingZip()
     {
         self.unarchiveTestAppWithExtension("zip")
+    }
+    
+    // This zip file has extraneous zero bytes added at the very end
+    func testUnarchivingBadZipWithExtaneousTrailingBytes() {
+        // We may receive a SIGPIPE error when writing data to a pipe
+        // The Autoupdate installer ignores SIGPIPE too
+        // We need to ignore it otherwise the xctest will terminate unexpectedly with exit code 13
+        signal(SIGPIPE, SIG_IGN)
+        
+        self.unarchiveTestAppWithExtension("zip", resourceName: "SparkleTestCodeSignApp_bad_extraneous", extractedAppName: "SparkleTestCodeSignApp", expectingSuccess: false)
+        
+        signal(SIGPIPE, SIG_DFL)
+    }
+    
+    func testUnarchivingBadZipWithMissingHeaderBytes() {
+        // We may receive a SIGPIPE error when writing data to a pipe
+        // The Autoupdate installer ignores SIGPIPE too
+        // We need to ignore it otherwise the xctest will terminate unexpectedly with exit code 13
+        signal(SIGPIPE, SIG_IGN)
+        
+        self.unarchiveTestAppWithExtension("zip", resourceName: "SparkleTestCodeSignApp_bad_header", extractedAppName: "SparkleTestCodeSignApp", expectingSuccess: false)
+        
+        signal(SIGPIPE, SIG_DFL)
     }
 
     func testUnarchivingTarDotGz()
@@ -92,22 +133,93 @@ class SUUnarchiverTest: XCTestCase
         self.unarchiveTestAppWithExtension("tar.xz")
     }
 
-    func testUnarchivingDmg()
+    func testUnarchivingHFSDmgWithLicenseAgreement()
     {
         self.unarchiveTestAppWithExtension("dmg")
     }
 
-    func testUnarchivingEncryptedDmg()
+    func testUnarchivingEncryptedDmgWithLicenseAgreement()
     {
         self.unarchiveTestAppWithExtension("enc.dmg", password: "testpass")
     }
     
-    func testUnarchivingFlatPackage()
+    func testUnarchivingEncryptedDmgWithoutLicenseAgreement()
+    {
+        self.unarchiveTestAppWithExtension("enc.nolicense.dmg", password: "testpass")
+    }
+    
+    func testUnarchivingEncryptedDmgWithLicenseAndWithIncorrectPassword()
+    {
+        self.unarchiveTestAppWithExtension("enc.dmg", password: "moo", expectingSuccess: false)
+    }
+    
+    func testUnarchivingEncryptedDmgWithLicenseAndWithoutPassword()
+    {
+        self.unarchiveTestAppWithExtension("enc.dmg", expectingSuccess: false)
+    }
+    
+    func testUnarchivingEncryptedDmgWithoutLicenseAndWithIncorrectPassword()
+    {
+        self.unarchiveTestAppWithExtension("enc.nolicense.dmg", password: "moo", expectingSuccess: false)
+    }
+    
+    func testUnarchivingEncryptedDmgWithoutLicenseAndWithoutPassword()
+    {
+        self.unarchiveTestAppWithExtension("enc.nolicense.dmg", expectingSuccess: false)
+    }
+    
+    func testUnarchivingAPFSDMG()
+    {
+        self.unarchiveTestAppWithExtension("dmg", resourceName: "SparkleTestCodeSign_apfs")
+    }
+    
+    func testUnarchivingAPFSDMGWithBogusPassword()
+    {
+        self.unarchiveTestAppWithExtension("dmg", password: "moo", resourceName: "SparkleTestCodeSign_apfs")
+    }
+    
+    func testUnarchivingAPFSAdhocSignedDMGWithAuxFiles()
+    {
+        self.unarchiveTestAppWithExtension("dmg", resourceName: "SparkleTestCodeSign_apfs_lzma_aux_files_adhoc")
+    }
+    
+    func testUnarchivingAPFSDMGWithPackage()
+    {
+        self.unarchiveTestAppWithExtension("dmg", resourceName: "SparkleTestCodeSign_pkg", expectingInstallationType: SPUInstallationTypeGuidedPackage)
+    }
+    
+    func testUnarchivingLicensedDMGWithNoText()
+    {
+        self.unarchiveTestAppWithExtension("license.no-text.dmg")
+    }
+    
+    func testUnarchivingLicensedDMGWithMultipleLanaguesAndLotsOfFormattedText()
+    {
+        self.unarchiveTestAppWithExtension("license.large-formatted-multi-lang-text.dmg")
+    }
+    
+#if SPARKLE_BUILD_PACKAGE_SUPPORT
+    func testUnarchivingBarePackage()
     {
         self.unarchiveTestAppWithExtension("pkg", resourceName: "test", expectingInstallationType: SPUInstallationTypeGuidedPackage)
         
         self.unarchiveTestAppWithExtension("pkg", resourceName: "test", expectingInstallationType: SPUInstallationTypeInteractivePackage, expectingSuccess: false)
         
         self.unarchiveTestAppWithExtension("pkg", resourceName: "test", expectingInstallationType: SPUInstallationTypeApplication, expectingSuccess: false)
+    }
+#endif
+    
+    func testUnarchivingAppleArchive() {
+        self.unarchiveTestAppWithExtension("aar", resourceName: "SparkleTestCodeSignApp")
+    }
+    
+    // If we support encrypted archives one day we will use "aea" file extension
+    // Password to this archive is whatisgoingonforeveroneday!
+    func testUnarchivingEncryptedAppleArchiveWithoutPassword() {
+        signal(SIGPIPE, SIG_IGN)
+        
+        self.unarchiveTestAppWithExtension("enc.aar", resourceName: "SparkleTestCodeSignApp", expectingSuccess: false)
+        
+        signal(SIGPIPE, SIG_DFL)
     }
 }

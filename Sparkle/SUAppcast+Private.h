@@ -6,13 +6,18 @@
 //  Copyright © 2021 Sparkle Project. All rights reserved.
 //
 
-#if __has_feature(modules)
-#if __has_warning("-Watimport-in-framework-header")
-#pragma clang diagnostic ignored "-Watimport-in-framework-header"
-#endif
-@import Foundation;
-#else
 #import <Foundation/Foundation.h>
+
+#ifdef BUILDING_SPARKLE_SOURCES_EXTERNALLY
+// Ignore incorrect warning
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wquoted-include-in-framework-header"
+#import "SUAppcast.h"
+#import "SPUAppcastSigningValidationStatus.h"
+#pragma clang diagnostic pop
+#else
+#import <Sparkle/SUAppcast.h>
+#import <Sparkle/SPUAppcastSigningValidationStatus.h>
 #endif
 
 NS_ASSUME_NONNULL_BEGIN
@@ -21,7 +26,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface SUAppcast (Private)
 
-- (nullable instancetype)initWithXMLData:(NSData *)xmlData relativeToURL:(NSURL * _Nullable)relativeURL stateResolver:(SPUAppcastItemStateResolver *)stateResolver error:(NSError * __autoreleasing *)error;
+- (nullable instancetype)initWithXMLData:(NSData *)xmlData relativeToURL:(NSURL * _Nullable)relativeURL stateResolver:(SPUAppcastItemStateResolver *)stateResolver signingValidationStatus:(SPUAppcastSigningValidationStatus)signingValidationStatus error:(NSError * __autoreleasing *)error;
 
 - (SUAppcast *)copyByFilteringItems:(BOOL (^)(SUAppcastItem *))filterBlock;
 

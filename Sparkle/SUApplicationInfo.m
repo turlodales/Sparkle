@@ -9,7 +9,6 @@
 #if SPARKLE_BUILD_UI_BITS || !BUILDING_SPARKLE
 
 #import "SUApplicationInfo.h"
-#import "SUBundleIcon.h"
 #import "SUHost.h"
 #import <AppKit/AppKit.h>
 
@@ -22,24 +21,16 @@
 
 + (NSImage *)bestIconForHost:(SUHost *)host
 {
-    NSURL *iconURL = [SUBundleIcon iconURLForHost:host];
+    BOOL isMainBundle = [host.bundle isEqualTo:[NSBundle mainBundle]];
+ 
+    // First try NSImageNameApplicationIcon. This image can be dynamically updated if the user's system icon settings change.
+    NSImage *icon = isMainBundle ? [NSImage imageNamed:NSImageNameApplicationIcon] : nil;
     
-    NSImage *icon = (iconURL == nil) ? nil : [[NSImage alloc] initWithContentsOfURL:iconURL];
-    
-    // Get icon from asset catalog if no explicit filename is provided.
-    if (!icon) {
-        icon = [host.bundle imageForResource:@SPARKLE_ICON_NAME];
+    // Next try asking NSWorkspace for icon of the bundle
+    if (icon == nil) {
+        icon = [[NSWorkspace sharedWorkspace] iconForFile:host.bundlePath];
     }
     
-    // Use a default icon if none is defined.
-    if (!icon) {
-        // this asumption may not be correct (eg. even though we're not the main bundle, it could be still be a regular app)
-        // but still better than nothing if no icon was included
-        BOOL isMainBundle = [host.bundle isEqualTo:[NSBundle mainBundle]];
-        
-        NSString *fileType = isMainBundle ? (__bridge NSString *)kUTTypeApplication : (__bridge NSString *)kUTTypeBundle;
-        icon = [[NSWorkspace sharedWorkspace] iconForFileType:fileType];
-    }
     return icon;
 }
 

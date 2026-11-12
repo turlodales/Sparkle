@@ -17,9 +17,6 @@
 #define SPUUserUpdateStateMajorUpgradeKey @"SPUUserUpdateStateMajorUpgrade"
 #define SPUUserUpdateStateCriticalUpdateKey @"SPUUserUpdateStateCriticalUpdate"
 
-@interface SPUUserUpdateState () <NSSecureCoding>
-@end
-
 @implementation SPUUserUpdateState
 
 @synthesize stage = _stage;
@@ -37,13 +34,13 @@
 
 - (void)encodeWithCoder:(NSCoder *)encoder
 {
-    [encoder encodeInteger:self.stage forKey:SPUUserUpdateStateStageKey];
-    [encoder encodeBool:self.userInitiated forKey:SPUUserUpdateStateUserInitiatedKey];
+    [encoder encodeInteger:_stage forKey:SPUUserUpdateStateStageKey];
+    [encoder encodeBool:_userInitiated forKey:SPUUserUpdateStateUserInitiatedKey];
 }
 
 - (instancetype)initWithCoder:(NSCoder *)decoder
 {
-    SPUUserUpdateStage stage = [decoder decodeIntegerForKey:SPUUserUpdateStateStageKey];
+    SPUUserUpdateStage stage = (SPUUserUpdateStage)[decoder decodeIntegerForKey:SPUUserUpdateStateStageKey];
     BOOL userInitiated = [decoder decodeBoolForKey:SPUUserUpdateStateUserInitiatedKey];
     
     return [self initWithStage:stage userInitiated:userInitiated];

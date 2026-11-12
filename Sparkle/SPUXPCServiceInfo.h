@@ -10,10 +10,10 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-BOOL SPUXPCServiceExists(NSString *bundleName);
+BOOL SPUXPCServiceIsEnabled(NSString *enabledKey);
 
-BOOL SPUXPCValidateServiceIfBundleExists(NSString *bundleName, NSBundle *sparkleBundle, NSError * __autoreleasing *error);
+BOOL SPUHelperHasExecutablePermission(NSString *component, NSString * _Nullable __autoreleasing * _Nullable failureReason);
 
-NSBundle * _Nullable SPUXPCServiceBundle(NSString *bundleName);
+BOOL SPUXPCServiceHasExecutablePermission(NSString *serviceName, NSString * _Nullable __autoreleasing * _Nullable failureReason);
 
 NS_ASSUME_NONNULL_END

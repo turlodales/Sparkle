@@ -1,129 +1,116 @@
-/* de_DE v0.1 - No comment provided by engineer. */
+/* No comment provided by engineer. */
+"%@ %@ is currently the newest version available." = "%1$@ %2$@, kullanılabilir en yeni sürümdür.";
 
-"%1$@ %2$@ has been downloaded and is ready to use! Would you like to install it and relaunch %1$@ now?" = "%1$@ %2$@ indirildi ve kullanıma hazır! Şimdi yüklemek ister misiniz? Uygulama yeniden başlatılacaktır.";
-
-/* de_DE v0.1 - No comment provided by engineer. */
-
-"%1$@ can't be updated, because it was opened from a read-only or a temporary location." = "%1$@ uygulaması geçici veya salt okunur bir konumdan açıldığı için güncellenemedi.";
-
-"Use Finder to copy %1$@ to the Applications folder, relaunch it from there, and try again." = "Lütfen %1$@ uygulamasını Uygulamalar dizinine kopyalayıp yeniden başlatınız.";
-
-/* de_DE v0.1 - No comment provided by engineer. */
-
-"%@ %@ is currently the newest version available." = "%1$@ %2$@ mevcut en yeni sürümdür.";
-
-"%@ %@ is currently the newest version available.\n(You are currently running version %@.)" = "%1$@ %2$@ mevcut en yeni sürümdür.\n(Şu anda %3$@ sürümünü kullanıyorsunuz.)";
-
-/* de_DE v0.1 - No comment provided by engineer. */
+/* No comment provided by engineer. */
+"%@ %@ is currently the newest version available.\n(You are currently running version %@.)" = "%1$@ %2$@, kullanılabilir en yeni sürümdür.\n(Şu anda %3$@ sürümünü kullanıyorsunuz.)";
 
 /* Description text for SUUpdateAlert when the update is downloadable. */
-"%@ %@ is now available--you have %@. Would you like to download it now?" = "%1$@ %2$@ çıktı (Kullandığınız Sürüm: %3$@). Şimdi yeni sürümü indirmek ister misiniz?";
+"%@ %@ is now available—you have %@. Would you like to download it now?" = "%1$@ %2$@ çıktı (kullandığınız sürüm: %3$@). Şimdi yeni sürümü indirmek ister misiniz?";
 
 /* Description text for SUUpdateAlert when the update informational with no download. */
-"%@ %@ is now available--you have %@. Would you like to learn more about this update on the web?" = "%1$@ %2$@ çıktı (kullandığınız sürüm: %3$@). Bu güncelleme ile ilgili olarak web sayfasından daha fazla bilgi almak ister misiniz?";
+"%@ %@ is now available—you have %@. Would you like to learn more about this update on the web?" = "%1$@ %2$@ çıktı (kullandığınız sürüm: %3$@). Bu güncelleme ile ilgili olarak web sayfasından daha fazla bilgi almak ister misiniz?";
 
+/* The download progress in a unit of bytes, e.g. 100 KB */
 "%@ downloaded" = "%@ indirildi";
 
-/* de_DE v0.1 - No comment provided by engineer. */
-
+/* The download progress in units of bytes, e.g. 100 KB of 1,0 MB */
 "%@ of %@" = "%1$@ / %2$@";
 
-/* de_DE v0.1 - No comment provided by engineer. */
+/* Description text for SUUpdateAlert when the update has already been downloaded and ready to install. */
+"%1$@ %2$@ has been downloaded and is ready to use! Would you like to install it and relaunch %1$@ now?" = "%1$@ %2$@ indirildi ve kullanıma hazır! Şimdi yüklemek ister misiniz? Uygulama yeniden başlatılacaktır.";
 
-"A new version of %@ is available!" = "%@ uygulaması için yeni bir sürüm var!";
+/* No comment provided by engineer. */
+"%1$@ can’t be updated because it was opened from a read-only or a temporary location." = "%1$@ uygulaması geçici veya salt okunur bir konumdan açıldığı için güncellenemiyor.";
 
-/* de_DE v0.1 - No comment provided by engineer. */
+/* No comment provided by engineer. */
+"A new version of %@ is available!" = "%@ uygulaması için yeni bir sürüm kullanılabilir!";
 
+/* No comment provided by engineer. */
 "A new version of %@ is ready to install!" = "%@ uygulamasının yeni bir sürümü yüklenmeye hazır!";
 
-/* de_DE v0.1 - No comment provided by engineer. */
+/* No comment provided by engineer. */
+"An error occurred in retrieving update information. Please try again later." = "Güncelleme bilgilerini alırken bir hata oluştu. Lütfen daha sonra yeniden deneyin.";
 
-"An error occurred in retrieving update information. Please try again later." = "Güncelleme bilgilerini alırken bir hata oluştu. Lütfen daha sonra tekrar deneyiniz.";
+/* No comment provided by engineer. */
+"An error occurred while downloading the update. Please try again later." = "Güncelleme indirilirken bir hata oluştu. Lütfen daha sonra yeniden deneyin.";
 
-/* de_DE v0.1 - No comment provided by engineer. */
+/* No comment provided by engineer. */
+"An error occurred while extracting the archive. Please try again later." = "İndirilen arşivi açarken bir hata oluştu. Lütfen daha sonra yeniden deneyin.";
 
-"An error occurred while downloading the update. Please try again later." = "Güncelleme indirilirken bir hata oluştu. Lütfen sonra tekrar deneyiniz.";
+/* No comment provided by engineer. */
+"An error occurred while parsing the update feed." = "Güncelleme kaynağı ayrıştırılırken bir hata oluştu.";
 
-/* de_DE v0.1 - No comment provided by engineer. */
-
-"An error occurred while extracting the archive. Please try again later." = "İndirilen arşivi açarken bir hata oluştu. Lütfen daha sonra tekrar deneyiniz.";
-
-/* de_DE v0.1 - No comment provided by engineer. */
-
-"An error occurred while installing the update. Please try again later." = "Güncellemeyi yüklerken bir hata oluştu. Lütfen daha sonra tekrar deneyiniz.";
-
-/* de_DE v0.1 - No comment provided by engineer. */
-
-"An error occurred while parsing the update feed." = "Güncelleme kaynağını incelerken bir hata oluştu.";
-
-/* de_DE v0.1 - No comment provided by engineer. */
-
-"An error occurred while parsing the update feed: %@" = "Güncelleme kaynağını incelerken bir hata oluştu: %@";
-
-/* de_DE v0.1 - No comment provided by engineer. */
-
-"An error occurred while relaunching %1$@, but the new version will be available next time you run %1$@." = "%1$@ uygulamasını açarken bir hata oluştu; ancak güncelleme %1$@ uygulamasını yeniden başlattığınızda hazır olacaktır.";
-
-/* de_DE v0.1 - the unit for bytes */
-
-"B" = "B";
-
-/* de_DE v0.1 - No comment provided by engineer. */
-
+/* No comment provided by engineer. */
 "Cancel" = "Vazgeç";
 
-/* de_DE v0.1 - No comment provided by engineer. */
+/* Run generate_progress_tool_localizations.py after updating. */
+"Cancel Update" = "Güncellemeden Vazgeç";
 
-"Cancel Update" = "Güncellemeyi iptal et";
+/* No comment provided by engineer. */
+"Checking for updates…" = "Güncellemeler denetleniyor…";
 
-/* de_DE v0.1 - No comment provided by engineer. */
+/* Take care not to overflow the status window. */
+"Downloading update…" = "Güncelleme indiriliyor…";
 
-"Checking for updates..." = "Güncellemelere bakılıyor...";
+/* Take care not to overflow the status window. */
+"Extracting update…" = "Güncelleme çıkarılıyor…";
 
-/* de_DE v0.1 - No comment provided by engineer. */
+/* No comment provided by engineer. */
+"Install and Relaunch" = "Yükle ve Yeniden Başlat";
 
-"Downloading update..." = "Güncelleme indiriliyor...";
+/* Run generate_progress_tool_localizations.py after updating. */
+"Installing update…" = "Güncelleme kuruluyor…";
 
-/* de_DE v0.1 - No comment provided by engineer. */
-
-"Extracting update..." = "Güncelleme ayıklanıyor...";
-
-/* de_DE v0.1 - the unit for gigabytes */
-
-"GB" = "GB";
-
-/* de_DE v0.1 - No comment provided by engineer. */
-
-"Install and Relaunch" = "Kur ve yeniden başlat";
-
-
-"Installing update..." = "Güncelleme kuruluyor...";
-
-/* the unit for kilobytes */
-
-"KB" = "KB";
-
-/* the unit for megabytes */
-
-"MB" = "MB";
-
-
+/* No comment provided by engineer. */
 "OK" = "Tamam";
 
+/* No comment provided by engineer. */
+"Ready to Install" = "Yüklemeye Hazır";
 
-"Ready to Install" = "Kuruluma hazır";
+/* No comment provided by engineer. */
+"Should %1$@ automatically check for updates? You can always check for updates manually from the %1$@ menu." = "%1$@ uygulaması güncellemeleri otomatik olarak denetlensin mi? Güncelleme işlemini el ile uygulama menüsünden de başlatabilirsiniz.";
 
+/* No comment provided by engineer. */
+"Update Error!" = "Güncelleme Hatası!";
 
-"Should %1$@ automatically check for updates? You can always check for updates manually from the %1$@ menu." = "%1$@ uygulaması için güncellemeler otomatik olarak aransın mı? Güncelleme işlemini el ile uygulama menüsünden de başlatabilirsiniz.";
-
-
-"Update Error!" = "Güncelleme hatası.";
-
-
+/* Run generate_progress_tool_localizations.py after updating. */
 "Updating %@" = "%@ güncelleniyor";
 
+/* No comment provided by engineer. */
+"Use Finder to copy %1$@ to the Applications folder, relaunch it from there, and try again." = "%1$@ uygulamasını Uygulamalar klasörüne kopyalamak için Finder'ı kullanın, onu oradan başlatın ve yeniden deneyin.";
 
-"You already have the newest version of %@." = "%@ uygulamasının en güncel sürümü sizde mevcut.";
+/* Status message shown when the user checks for updates but is already current or the feed doesn't contain any updates. */
+"You’re up to date!" = "Uygulama güncel!";
 
+/* Software Update title/label */
+"Software Update" = "Yazılım Güncelleme";
 
-"You're up-to-date!" = "Uygulama güncel!";
+/* Remind Me Later choice for update alert */
+"Remind Me Later" = "Daha Sonra Anımsat";
+
+/* Skip This Version choice for update alert */
+"Skip This Version" = "Bu Sürümü Atla";
+
+/* Install Update choice for update alert */
+"Install Update" = "Yükle";
+
+/* Automatically download and install updates in the future option for update alert */
+"Automatically download and install updates in the future" = "Gelecekte güncellemeleri otomatik olarak indir ve yükle";
+
+/* Check for updates automatically response for update permission dialog */
+"Check Automatically" = "Otomatik Olarak Denetle";
+
+/* Don't check for updates automatically response for update permission dialog */
+"Don’t Check" = "Denetleme";
+
+/* Title question for update permission dialog */
+"Check for updates automatically?" = "Güncellemeler otomatik olarak denetlensin mi?";
+
+/* Include anonymous system profile choice for update permission dialog */
+"Include anonymous system profile" = "Anonim sistem profilini içer";
+
+/* Automatically download and install updates choice for update permission dialog */
+"Automatically download and install updates" = "Güncellemeleri otomatik olarak indir ve yükle";
+
+/* Anonymous system profile information disclosure for update permission dialog */
+"Anonymous system profile information is used to help us plan future development work. Please contact us if you have any questions about this.\n\nThis is the information that would be sent:" = "Gönderdiğiniz anonim sistem bilgileri bu yazılımın geliştirilmesi için kullanılacaktır. Konu ile ilgili ayrıntılı bilgi için lütfen bizimle iletişime geçin. Gönderilecek bilgiler:";

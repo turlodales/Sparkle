@@ -9,63 +9,55 @@
 #import "SPUXPCServiceInfo.h"
 #import "SUErrors.h"
 #import "SUConstants.h"
-
+#import "SUHost.h"
 
 #include "AppKitPrevention.h"
 
-BOOL SPUXPCServiceExists(NSString *bundleName)
+BOOL SPUXPCServiceIsEnabled(NSString *enabledKey)
 {
-    NSBundle *xpcBundle = SPUXPCServiceBundle(bundleName);
-    return (xpcBundle != nil);
+    NSBundle *mainBundle = [NSBundle mainBundle];
+    SUHost *mainBundleHost = [[SUHost alloc] initWithBundle:mainBundle];
+    
+    return [mainBundleHost boolForInfoDictionaryKey:enabledKey];
 }
 
-BOOL SPUXPCValidateServiceIfBundleExists(NSString *bundleName, NSBundle *sparkleBundle, NSError * __autoreleasing *error)
+BOOL SPUHelperHasExecutablePermission(NSString *component, NSString * _Nullable __autoreleasing * _Nullable failureReason)
 {
-    NSBundle *xpcBundle = SPUXPCServiceBundle(bundleName);
-    if (xpcBundle == nil) {
-        return YES;
-    }
-
-#if !DEBUG
-        // Post install scripts for appending git hash info to CFBundleShortVersionString are too unreliable to verify for debug/development
-        // Fortunately debug builds of Sparkle are not usable in a production environment
-    (void)sparkleBundle; // Mark parameter as used
-#else
-        // Make sure the display versions of Sparkle and the XPC bundle match
-        // These versions may contain a git hash identifier if built from the Sparkle repository
-    NSString *sparkleDisplayVersion = [sparkleBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
-    NSString *xpcDisplayVersion = [xpcBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
-
-    if (sparkleDisplayVersion == nil || xpcDisplayVersion == nil || ![sparkleDisplayVersion isEqualToString:xpcDisplayVersion]) {
-        if (error != NULL) {
-            *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUInvalidUpdaterError userInfo:@{ NSLocalizedDescriptionKey: [NSString stringWithFormat:@"XPC Version mismatch. Framework display version is %@ but XPC Service (%@) display version is %@. Bundled XPC Service cannot be used.", sparkleDisplayVersion, xpcBundle.bundlePath, xpcDisplayVersion] }];
+    NSBundle *sparkleBundle = [NSBundle bundleWithIdentifier:SUBundleIdentifier];
+    NSURL *helperURL = [[sparkleBundle.bundleURL URLByAppendingPathComponent:component isDirectory:NO] URLByResolvingSymlinksInPath];
+    
+    NSString *helperPath = helperURL.path;
+    
+    NSError *attributesError = nil;
+    NSDictionary<NSFileAttributeKey, id> *attributes = [NSFileManager.defaultManager attributesOfItemAtPath:helperPath error:&attributesError];
+    
+    if (attributes == nil) {
+        if (failureReason != NULL) {
+            *failureReason = [NSString stringWithFormat:@"Failed to fetch info from file '%@' -- does this helper exist? %@", helperPath, attributesError.localizedDescription];
         }
+        
         return NO;
     }
-#endif
-
-        // Make sure the bundle versions of Sparkle and the XPC bundle match
-    NSString *xpcBundleVersion = [xpcBundle objectForInfoDictionaryKey:(__bridge NSString *)kCFBundleVersionKey];
-
-    if (xpcBundleVersion == nil || ![xpcBundleVersion isEqualToString:@""CURRENT_PROJECT_VERSION]) {
-        if (error != NULL) {
-            *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUInvalidUpdaterError userInfo:@{ NSLocalizedDescriptionKey: [NSString stringWithFormat:@"XPC Version mismatch. Framework bundle version is %@ but XPC Service (%@) bundle version is %@. Bundled XPC Service cannot be used.", @""CURRENT_PROJECT_VERSION, xpcBundle.bundlePath, xpcBundleVersion] }];
+    
+    NSNumber *posixPermissions = attributes[NSFilePosixPermissions];
+    
+    if (posixPermissions != nil) {
+        mode_t mode = posixPermissions.unsignedShortValue;
+        if (((mode & S_IXUSR) == 0 || (mode & S_IXGRP) == 0 || (mode & S_IXOTH) == 0)) {
+            if (failureReason != NULL) {
+                *failureReason = [NSString stringWithFormat:@"The file '%@' may not have executable permissions -- were they lost during a bad file copy? Please ensure file permissions and symbolic links for Sparkle framework are preserved.", helperPath];
+            }
+            
+            return NO;
         }
-        return NO;
     }
-
+    
     return YES;
 }
 
-NSBundle * _Nullable SPUXPCServiceBundle(NSString *bundleName)
+BOOL SPUXPCServiceHasExecutablePermission(NSString *serviceName, NSString * _Nullable __autoreleasing * _Nullable failureReason)
 {
-    NSBundle *mainBundle = [NSBundle mainBundle];
-    NSURL *executableURL = mainBundle.executableURL;
-    if (executableURL == nil) {
-        return nil;
-    }
+    NSString *componentName = [NSString stringWithFormat:@"XPCServices/%@.xpc/Contents/MacOS/%@", serviceName, serviceName];
     
-    NSURL *xpcBundleURL = [[[executableURL.URLByDeletingLastPathComponent.URLByDeletingLastPathComponent URLByAppendingPathComponent:@"XPCServices"] URLByAppendingPathComponent:bundleName] URLByAppendingPathExtension:@"xpc"];
-    
-    return [NSBundle bundleWithURL:xpcBundleURL];
+    return SPUHelperHasExecutablePermission(componentName, failureReason);
 }

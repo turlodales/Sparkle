@@ -8,7 +8,6 @@
 
 #import "SUInstaller.h"
 #import "SUPlainInstaller.h"
-#import "SUPackageInstaller.h"
 #import "SUGuidedPackageInstaller.h"
 #import "SUHost.h"
 #import "SUConstants.h"
@@ -22,16 +21,10 @@
 
 @implementation SUInstaller
 
-+ (BOOL)isAliasFolderAtPath:(NSString *)path
-{
-    NSNumber *aliasFlag = nil;
-    [[NSURL fileURLWithPath:path] getResourceValue:&aliasFlag forKey:NSURLIsAliasFileKey error:nil];
-    NSNumber *directoryFlag = nil;
-    [[NSURL fileURLWithPath:path] getResourceValue:&directoryFlag forKey:NSURLIsDirectoryKey error:nil];
-    return aliasFlag.boolValue && directoryFlag.boolValue;
-}
-
-+ (nullable NSString *)installSourcePathInUpdateFolder:(NSString *)inUpdateFolder forHost:(SUHost *)host isPackage:(BOOL *)isPackagePtr isGuided:(BOOL *)isGuidedPtr
++ (nullable NSString *)installSourcePathInUpdateFolder:(NSString *)inUpdateFolder forHost:(SUHost *)host
+#if SPARKLE_BUILD_PACKAGE_SUPPORT
+                                             isPackage:(BOOL *)isPackagePtr isGuided:(BOOL *)isGuidedPtr
+#endif
 {
     NSParameterAssert(inUpdateFolder);
     NSParameterAssert(host);
@@ -41,23 +34,59 @@
         *newAppDownloadPath = nil,
         *bundleFileName = [[host bundlePath] lastPathComponent],
         *alternateBundleFileName = [[host name] stringByAppendingPathExtension:[[host bundlePath] pathExtension]];
+#if SPARKLE_BUILD_PACKAGE_SUPPORT
+    NSString *fallbackPackagePath = nil;
+    
     BOOL isPackage = NO;
     BOOL isGuided = YES;
-    NSString *fallbackPackagePath = nil;
+#endif
     NSDirectoryEnumerator *dirEnum = [[NSFileManager defaultManager] enumeratorAtPath:inUpdateFolder];
     NSString *bundleFileNameNoExtension = [bundleFileName stringByDeletingPathExtension];
 
     while ((currentFile = [dirEnum nextObject])) {
         NSString *currentPath = [inUpdateFolder stringByAppendingPathComponent:currentFile];
+        
+        // Ignore all symbolic links and aliases
+        {
+            NSURL *currentPathURL = [NSURL fileURLWithPath:currentPath];
+            
+            NSNumber *symbolicLinkFlag = nil;
+            [currentPathURL getResourceValue:&symbolicLinkFlag forKey:NSURLIsSymbolicLinkKey error:NULL];
+            if (symbolicLinkFlag.boolValue) {
+                // NSDirectoryEnumerator won't recurse into symlinked directories
+                continue;
+            }
+            
+            NSNumber *aliasFlag = nil;
+            [currentPathURL getResourceValue:&aliasFlag forKey:NSURLIsAliasFileKey error:NULL];
+            
+            if (aliasFlag.boolValue) {
+                NSNumber *directoryFlag = nil;
+                [currentPathURL getResourceValue:&directoryFlag forKey:NSURLIsDirectoryKey error:NULL];
+
+                // Some DMGs have symlinks into /Applications! That's no good!
+                if (directoryFlag.boolValue) {
+                    [dirEnum skipDescendents];
+                }
+                
+                continue;
+            }
+        }
+        
         NSString *currentFilename = [currentFile lastPathComponent];
+#if SPARKLE_BUILD_PACKAGE_SUPPORT
         NSString *currentExtension = [currentFile pathExtension];
         NSString *currentFilenameNoExtension = [currentFilename stringByDeletingPathExtension];
+#endif
         if ([currentFilename isEqualToString:bundleFileName] ||
             [currentFilename isEqualToString:alternateBundleFileName]) // We found one!
         {
+#if SPARKLE_BUILD_PACKAGE_SUPPORT
             isPackage = NO;
+#endif
             newAppDownloadPath = currentPath;
             break;
+#if SPARKLE_BUILD_PACKAGE_SUPPORT
         } else if ([currentExtension isEqualToString:@"pkg"] ||
                    [currentExtension isEqualToString:@"mpkg"]) {
             if ([currentFilenameNoExtension isEqualToString:bundleFileNameNoExtension]) {
@@ -68,22 +97,22 @@
                 // Remember any other non-matching packages we have seen should we need to use one of them as a fallback.
                 fallbackPackagePath = currentPath;
             }
+#endif
         } else {
             // Try matching on bundle identifiers in case the user has changed the name of the host app
             NSBundle *incomingBundle = [NSBundle bundleWithPath:currentPath];
             NSString *hostBundleIdentifier = host.bundle.bundleIdentifier;
             if (incomingBundle && [incomingBundle.bundleIdentifier isEqualToString:hostBundleIdentifier]) {
+#if SPARKLE_BUILD_PACKAGE_SUPPORT
                 isPackage = NO;
+#endif
                 newAppDownloadPath = currentPath;
                 break;
             }
         }
-
-        // Some DMGs have symlinks into /Applications! That's no good!
-        if ([self isAliasFolderAtPath:currentPath])
-            [dirEnum skipDescendents];
     }
 
+#if SPARKLE_BUILD_PACKAGE_SUPPORT
     // We don't have a valid path. Try to use the fallback package.
 
     if (newAppDownloadPath == nil && fallbackPackagePath != nil) {
@@ -93,7 +122,7 @@
 
     if (isPackage) {
         // Guided (or now "normal") installs used to be opt-in (i.e, Sparkle would detect foo.sparkle_guided.pkg or foo.sparkle_guided.mpkg),
-        // but to get an interactive (or "unguided") install, the developer now must opt-out of guided installations.
+        // Interactive installs are no longer supported, so isGuided = NO will later turn into an error
         
         // foo.app -> foo.sparkle_interactive.pkg or foo.sparkle_interactive.mpkg
         if ([[[newAppDownloadPath stringByDeletingPathExtension] pathExtension] isEqualToString:@"sparkle_interactive"]) {
@@ -105,18 +134,33 @@
         *isPackagePtr = isPackage;
     if (isGuidedPtr)
         *isGuidedPtr = isGuided;
+    
+#endif
 
     if (!newAppDownloadPath) {
-        SULog(SULogLevelError, @"Searched %@ for %@.(app|pkg)", inUpdateFolder, bundleFileNameNoExtension);
+        SULog(SULogLevelError, @"Searched %@ for %@.(app%@)", inUpdateFolder, bundleFileNameNoExtension,
+#if SPARKLE_BUILD_PACKAGE_SUPPORT
+              @"|pkg"
+#else
+              @""
+#endif
+              );
     }
     return newAppDownloadPath;
 }
 
-+ (nullable id<SUInstallerProtocol>)installerForHost:(SUHost *)host expectedInstallationType:(NSString *)expectedInstallationType updateDirectory:(NSString *)updateDirectory homeDirectory:(NSString *)homeDirectory userName:(NSString *)userName error:(NSError * __autoreleasing *)error
++ (nullable id<SUInstallerProtocol>)installerForHost:(SUHost *)host expectedInstallationType:(NSString *)expectedInstallationType updateDirectory:(NSString *)updateDirectory connectionCodeSigningValidationSkipped:(BOOL)connectionCodeSigningValidationSkipped homeDirectory:(NSString *)homeDirectory userName:(NSString *)userName error:(NSError * __autoreleasing *)error
 {
+#if SPARKLE_BUILD_PACKAGE_SUPPORT
     BOOL isPackage = NO;
     BOOL isGuided = NO;
-    NSString *newDownloadPath = [self installSourcePathInUpdateFolder:updateDirectory forHost:host isPackage:&isPackage isGuided:&isGuided];
+#endif
+    
+    NSString *newDownloadPath = [self installSourcePathInUpdateFolder:updateDirectory forHost:host
+#if SPARKLE_BUILD_PACKAGE_SUPPORT
+                                                            isPackage:&isPackage isGuided:&isGuided
+#endif
+    ];
     
     if (newDownloadPath == nil) {
         if (error != NULL) {
@@ -125,10 +169,88 @@
         return nil;
     }
     
+#if SPARKLE_BUILD_PACKAGE_SUPPORT
+    if (isPackage && connectionCodeSigningValidationSkipped) {
+        // Package updates cannot update arbitrary bundles if code signing validation on the connection was skipped
+        // (This means our helper is not code signed with an Apple issued certificate).
+        // In this case, the main executable must be owned by root and the host must contain our installer tool
+        
+        NSString *installerExecutablePath = NSBundle.mainBundle.executableURL.URLByResolvingSymlinksInPath.path;
+        if (installerExecutablePath == nil) {
+            if (error != NULL) {
+                *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUMissingUpdateError userInfo:@{ NSLocalizedDescriptionKey: @"The "@SPARKLE_RELAUNCH_TOOL_NAME" executable path failed to be retrieved, which is an internal error that shouldn't happen. Please try to update using a production build of your app." }];
+            }
+            
+            return nil;
+        }
+        
+        NSString *hostBundlePath = host.bundle.bundleURL.URLByResolvingSymlinksInPath.path;
+        if (hostBundlePath == nil) {
+            if (error != NULL) {
+                *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUMissingUpdateError userInfo:@{ NSLocalizedDescriptionKey: @"The host bundle path to update to be retrieved, which is an internal error that shouldn't happen. Please try to update using a production build of your app." }];
+            }
+            
+            return nil;
+        }
+        
+        NSError *attributesError = nil;
+        NSDictionary<NSFileAttributeKey, id> *fileAttributes = [NSFileManager.defaultManager attributesOfItemAtPath:installerExecutablePath error:&attributesError];
+        
+        if (fileAttributes == nil) {
+            if (error != NULL) {
+                *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUMissingUpdateError userInfo:@{ NSLocalizedDescriptionKey: @"File attributes failed to be retrieved from the "@SPARKLE_RELAUNCH_TOOL_NAME" executable, which is an internal error that shouldn't happen. Please try to update using a production build of your app." }];
+            }
+            
+            return nil;
+        }
+        
+        NSNumber *installerOwnerID = fileAttributes[NSFileOwnerAccountID];
+        if (installerOwnerID == nil) {
+            if (error != NULL) {
+                *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUMissingUpdateError userInfo:@{ NSLocalizedDescriptionKey: @"File owner ID failed to be retrieved from the "@SPARKLE_RELAUNCH_TOOL_NAME" executable, which is an internal error that shouldn't happen. Please try to update using a production build of your app." }];
+            }
+            
+            return nil;
+        }
+        
+        // Check our helper is owned by root
+        if (![installerOwnerID isEqual:@(0)]) {
+            if (error != NULL) {
+                *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUMissingUpdateError userInfo:@{ NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Due to security, updating apps with package installers is disabled when '%@' is not signed with the same Team ID as your app, and "@SPARKLE_RELAUNCH_TOOL_NAME" is not owned by root (this specific case) or not residing in '%@'. Please either test an exported & production build of your app, or for development, code sign your app and Sparkle's embedded helpers with the same team: https://sparkle-project.org/documentation/sandboxing#code-signing", installerExecutablePath, hostBundlePath] }];
+            }
+            
+            return nil;
+        }
+        
+        NSArray<NSString *> *installerExecutablePathComponents = installerExecutablePath.pathComponents;
+        NSArray<NSString *> *hostBundlePathComponents = hostBundlePath.pathComponents;
+        
+        if (installerExecutablePathComponents.count <= hostBundlePathComponents.count) {
+            if (error != NULL) {
+                *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUMissingUpdateError userInfo:@{ NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Due to security, updating apps with package installers is disabled when '%@' is not signed with the same Team ID as your app, and "@SPARKLE_RELAUNCH_TOOL_NAME" is not owned by root or not residing in '%@' (this specific case). Please either test an exported & production build of your app, or for development, code sign your app and Sparkle's embedded helpers with the same team: https://sparkle-project.org/documentation/sandboxing#code-signing", installerExecutablePath, hostBundlePath] }];
+            }
+            
+            return nil;
+        }
+        
+        // Check out helper resides inside the host app to be updated
+        if (![[installerExecutablePathComponents subarrayWithRange:NSMakeRange(0, hostBundlePathComponents.count)] isEqualToArray:hostBundlePathComponents]) {
+            if (error != NULL) {
+                *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUMissingUpdateError userInfo:@{ NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Due to security, updating apps with package installers is disabled when '%@' is not signed with the same Team ID as your app, and "@SPARKLE_RELAUNCH_TOOL_NAME" is not owned by root or not residing in '%@' (this specific case). Please either test an exported & production build of your app, or for development, code sign your app and Sparkle's embedded helpers with the same team: https://sparkle-project.org/documentation/sandboxing#code-signing", installerExecutablePath, hostBundlePath] }];
+            }
+            
+            return nil;
+        }
+    }
+#else
+    (void)connectionCodeSigningValidationSkipped;
+#endif
+    
     // Make sure we find the type of installer that we were expecting to find
     // We shouldn't implicitly trust the installation type fed into here from the appcast because the installation type helps us determine
     // ahead of time whether or not this installer tool should be ran as root or not
     id <SUInstallerProtocol> installer = nil;
+#if SPARKLE_BUILD_PACKAGE_SUPPORT
     if (isPackage && isGuided) {
         if (![expectedInstallationType isEqualToString:SPUInstallationTypeGuidedPackage]) {
             if (error != NULL) {
@@ -138,14 +260,12 @@
             installer = [[SUGuidedPackageInstaller alloc] initWithPackagePath:newDownloadPath homeDirectory:homeDirectory userName:userName];
         }
     } else if (isPackage) {
-        if (![expectedInstallationType isEqualToString:SPUInstallationTypeInteractivePackage]) {
-            if (error != NULL) {
-                *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUInstallationError userInfo:@{ NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Found package installer but '%@=%@' was probably missing in the appcast item enclosure", SUAppcastAttributeInstallationType, SPUInstallationTypeInteractivePackage] }];
-            }
-        } else {
-            installer = [[SUPackageInstaller alloc] initWithPackagePath:newDownloadPath];
+        if (error != NULL) {
+            *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUInstallationError userInfo:@{ NSLocalizedDescriptionKey: @"Found interactive package installer (with 'sparkle_interactive' in the filename) but these are no longer supported. Please remove 'sparkle_interactive' from the filename." }];
         }
-    } else {
+    } else
+#endif
+    {
         if (![expectedInstallationType isEqualToString:SPUInstallationTypeApplication]) {
             if (error != NULL) {
                 *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUInstallationError userInfo:@{ NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Found regular application update but expected '%@=%@' from the appcast item enclosure instead", SUAppcastAttributeInstallationType, expectedInstallationType] }];

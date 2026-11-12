@@ -9,7 +9,7 @@
 #if SPARKLE_BUILD_UI_BITS
 
 #import "SUWKWebView.h"
-#import "SUWebViewCommon.h"
+#import "SUReleaseNotesCommon.h"
 #import "SULog.h"
 #import "SUErrors.h"
 #import <WebKit/WebKit.h>
@@ -22,22 +22,21 @@
 @end
 
 @interface SUWKWebView () <WKNavigationDelegate>
-
-@property (nonatomic, readonly) WKWebView *webView;
-@property (nonatomic) WKNavigation *currentNavigation;
-@property (nonatomic) void (^completionHandler)(NSError * _Nullable);
-@property (nonatomic) BOOL drawsWebViewBackground;
-
 @end
 
 @implementation SUWKWebView
+{
+    WKWebView *_webView;
+    WKNavigation *_currentNavigation;
+    NSArray<NSString *> *_customAllowedURLSchemes;
+    
+    void (^_completionHandler)(NSError * _Nullable);
+    
+    BOOL _drawsWebViewBackground;
+    BOOL _allowsLoadingExternalReferences;
+}
 
-@synthesize webView = _webView;
-@synthesize currentNavigation = _currentNavigation;
-@synthesize completionHandler = _completionHandler;
-@synthesize drawsWebViewBackground = _drawsWebViewBackground;
-
-static WKUserScript *_userScriptWithInjectedStyleSource(NSString *styleSource)
+static WKUserScript *makeUserScriptWithInjectedStyleSource(NSString *styleSource)
 {
     // We must remove newlines when inserting the style source in this interpolated string below
     NSString *strippedStyleSource = [styleSource stringByReplacingOccurrencesOfString:@"\n" withString:@""];
@@ -55,12 +54,34 @@ static WKUserScript *_userScriptWithInjectedStyleSource(NSString *styleSource)
     return [[WKUserScript alloc] initWithSource:scriptSource injectionTime:WKUserScriptInjectionTimeAtDocumentEnd forMainFrameOnly:YES];
 }
 
-- (instancetype)initWithColorStyleSheetLocation:(NSURL *)colorStyleSheetLocation fontFamily:(NSString *)fontFamily fontPointSize:(int)fontPointSize javaScriptEnabled:(BOOL)javaScriptEnabled
+static WKUserScript *makeUserScriptForExposingCurrentRelease(NSString *releaseString)
+{
+    // Check that release string can be safely injected
+    NSMutableCharacterSet *allowedCharacterSet = [NSMutableCharacterSet alphanumericCharacterSet];
+    [allowedCharacterSet addCharactersInString:@"_.- "];
+    if ([releaseString rangeOfCharacterFromSet:allowedCharacterSet.invertedSet].location != NSNotFound) {
+        SULog(SULogLevelDefault, @"warning: App version '%@' has characters unsafe for injection. The version number will not be exposed to the release notes CSS. Only [a-zA-Z0-9._- ] is allowed.", releaseString);
+        return nil;
+    }
+    
+    // This script adds the `sparkle-installed-version` class to all elements which have a matching `data-sparkle-version` attribute
+    NSString *scriptSource = [NSString stringWithFormat:
+        @"document.querySelectorAll(\'[data-sparkle-version=\"%@\"]\')\n"
+        @".forEach(installedVersionElement =>\n"
+        @"installedVersionElement.classList.add('sparkle-installed-version')\n"
+        @");", releaseString];
+    
+    return [[WKUserScript alloc] initWithSource:scriptSource injectionTime:WKUserScriptInjectionTimeAtDocumentEnd forMainFrameOnly:YES];
+}
+
+- (instancetype)initWithColorStyleSheetLocation:(NSURL *)colorStyleSheetLocation fontFamily:(NSString *)fontFamily fontPointSize:(int)fontPointSize javaScriptEnabled:(BOOL)javaScriptEnabled customAllowedURLSchemes:(NSArray<NSString *> *)customAllowedURLSchemes allowsLoadingExternalReferences:(BOOL)allowsLoadingExternalReferences installedVersion:(NSString *)installedVersion
 {
     self = [super init];
     if (self != nil) {
         // Synchronize with web view defaulting to drawing background to avoid unnecessary invocations in -setDrawsBackground:
         _drawsWebViewBackground = YES;
+        
+        _allowsLoadingExternalReferences = allowsLoadingExternalReferences;
         
         WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
         
@@ -79,7 +100,7 @@ static WKUserScript *_userScriptWithInjectedStyleSource(NSString *styleSource)
         
         WKUserContentController *userContentController = [[WKUserContentController alloc] init];
         
-        NSString *fontStyleContents = [NSString stringWithFormat:@"body { font-family: %@; font-size: %dpt; }", fontFamily, fontPointSize];
+        NSString *fontStyleContents = [NSString stringWithFormat:@"body { font-family: %@; font-size: %dpx; }", fontFamily, fontPointSize];
         
         NSString *finalStyleContents;
         if (colorStyleContents == nil) {
@@ -94,91 +115,129 @@ static WKUserScript *_userScriptWithInjectedStyleSource(NSString *styleSource)
         // In fact, we must execute javascript to properly inject our default CSS style into the DOM
         // Legacy WebView has exposed methods for custom stylesheets and default fonts,
         // but WKWebView seems to forgo that type of API surface in favor of user scripts like this
-        [userContentController addUserScript:_userScriptWithInjectedStyleSource(finalStyleContents)];
+        WKUserScript *userScriptWithInjectedStyleSource = makeUserScriptWithInjectedStyleSource(finalStyleContents);
+        if (userScriptWithInjectedStyleSource == nil) {
+            SULog(SULogLevelError, @"Failed to create script for injecting style");
+        } else {
+            [userContentController addUserScript:userScriptWithInjectedStyleSource];
+        }
+        
+        WKUserScript *userScriptForExposingCurrentRelease = makeUserScriptForExposingCurrentRelease(installedVersion);
+        if (userScriptForExposingCurrentRelease == nil) {
+            SULog(SULogLevelDefault, @"warning: Failed to create script for injecting version %@", installedVersion);
+        } else {
+            [userContentController addUserScript:userScriptForExposingCurrentRelease];
+        }
+        
         configuration.userContentController = userContentController;
         
         _webView = [[WKWebView alloc] initWithFrame:NSZeroRect configuration:configuration];
         _webView.navigationDelegate = self;
+        
+        _customAllowedURLSchemes = customAllowedURLSchemes;
     }
     return self;
 }
 
 - (NSView *)view
 {
-    return self.webView;
+    return _webView;
 }
 
-- (void)loadHTMLString:(NSString *)htmlString baseURL:(NSURL * _Nullable)baseURL completionHandler:(void (^)(NSError * _Nullable))completionHandler
+static void SPULoadWebContent(BOOL allowsExternalReferences, WKUserContentController *userContentController, void (^loadHTMLContent)(void))
 {
-    self.completionHandler = [completionHandler copy];
+    if (allowsExternalReferences) {
+        loadHTMLContent();
+        return;
+    }
     
-    self.currentNavigation = [self.webView loadHTMLString:htmlString baseURL:baseURL];
+    // Block loading all external resources for signed appcasts & signed release notes
+    NSString *encodedContentRuleList =
+        @"[{\"trigger\": { \"url-filter\": \".*\" }, \"action\": { \"type\": \"block\" } }]";
+    
+    [WKContentRuleListStore.defaultStore compileContentRuleListForIdentifier:@"sparkle-updater" encodedContentRuleList:encodedContentRuleList completionHandler:^(WKContentRuleList *contentRuleList, NSError *contentRuleListError) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (contentRuleList == nil) {
+                SULog(SULogLevelError, @"Error: failed to load content rule list for WKWebView with error: %@", contentRuleListError);
+            } else {
+                [userContentController addContentRuleList:contentRuleList];
+            }
+            
+            loadHTMLContent();
+        });
+    }];
+}
+
+- (void)loadString:(NSString *)htmlString baseURL:(NSURL * _Nullable)baseURL completionHandler:(void (^)(NSError * _Nullable))completionHandler
+{
+    _completionHandler = [completionHandler copy];
+    
+    SPULoadWebContent(_allowsLoadingExternalReferences, _webView.configuration.userContentController, ^{
+        self->_currentNavigation = [self->_webView loadHTMLString:htmlString baseURL:baseURL];
+    });
 }
 
 - (void)loadData:(NSData *)data MIMEType:(NSString *)MIMEType textEncodingName:(NSString *)textEncodingName baseURL:(NSURL *)baseURL completionHandler:(void (^)(NSError * _Nullable))completionHandler
 {
-    self.completionHandler = [completionHandler copy];
+    _completionHandler = [completionHandler copy];
 
-    self.currentNavigation = [self.webView loadData:data MIMEType:MIMEType characterEncodingName:textEncodingName baseURL:baseURL];
+    SPULoadWebContent(_allowsLoadingExternalReferences, _webView.configuration.userContentController, ^{
+        self->_currentNavigation = [self->_webView loadData:data MIMEType:MIMEType characterEncodingName:textEncodingName baseURL:baseURL];
+    });
 }
 
 - (void)setDrawsBackground:(BOOL)drawsBackground
 {
-    if (self.drawsWebViewBackground != drawsBackground) {
+    if (_drawsWebViewBackground != drawsBackground) {
         // Unfortunately we have to rely on a private API
         // FB7539179: https://github.com/feedback-assistant/reports/issues/81 | https://bugs.webkit.org/show_bug.cgi?id=155550
         // But it seems like others are already relying on it, passed App Review, and apps couldn't be broken due to compatibility
-        if (@available(macOS 10.12, *)) {
-            if ([self.webView respondsToSelector:@selector(_setDrawsBackground:)]) {
-                [self.webView _setDrawsBackground:drawsBackground];
-            }
-        } else {
-            if ([self.webView respondsToSelector:@selector(_setDrawsTransparentBackground:)]) {
-                [self.webView _setDrawsTransparentBackground:!drawsBackground];
-            }
+        // Note: before we were using _setDrawsTransparentBackground < macOS 10.12
+        if ([_webView respondsToSelector:@selector(_setDrawsBackground:)]) {
+            [_webView _setDrawsBackground:drawsBackground];
         }
         
-        self.drawsWebViewBackground = drawsBackground;
+        _drawsWebViewBackground = drawsBackground;
     }
 }
 
 - (void)stopLoading
 {
-    self.completionHandler = nil;
-    [self.webView stopLoading];
+    _completionHandler = nil;
+    [_webView stopLoading];
 }
 
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation
 {
-    if (navigation == self.currentNavigation) {
-        if (self.completionHandler != nil) {
-            self.completionHandler(nil);
-            self.completionHandler = nil;
+    if (navigation == _currentNavigation) {
+        if (_completionHandler != nil) {
+            _completionHandler(nil);
+            _completionHandler = nil;
         }
-        self.currentNavigation = nil;
+        _currentNavigation = nil;
     }
 }
 
 - (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)navigation withError:(NSError *)error
 {
-    if (navigation == self.currentNavigation) {
-        if (self.completionHandler != nil) {
-            self.completionHandler(error);
-            self.completionHandler = nil;
+    if (navigation == _currentNavigation) {
+        if (_completionHandler != nil) {
+            _completionHandler(error);
+            _completionHandler = nil;
         }
-        self.currentNavigation = nil;
+        _currentNavigation = nil;
     }
 }
 
 - (void)webViewWebContentProcessDidTerminate:(WKWebView *)webView
 {
-    if (self.currentNavigation != nil) {
-        if (self.completionHandler != nil) {
-            self.completionHandler([NSError errorWithDomain:SUSparkleErrorDomain code:SUWebKitTerminationError userInfo:nil]);
-            self.completionHandler = nil;
+    if (_currentNavigation != nil) {
+        if (_completionHandler != nil) {
+            _completionHandler([NSError errorWithDomain:SUSparkleErrorDomain code:SUWebKitTerminationError userInfo:nil]);
+            _completionHandler = nil;
         }
         
-        self.currentNavigation = nil;
+        _currentNavigation = nil;
     }
 }
 
@@ -187,7 +246,7 @@ static WKUserScript *_userScriptWithInjectedStyleSource(NSString *styleSource)
     NSURLRequest *request = navigationAction.request;
     NSURL *requestURL = request.URL;
     BOOL isAboutBlank = NO;
-    BOOL safeURL = SUWebViewIsSafeURL(requestURL, &isAboutBlank);
+    BOOL safeURL = SUReleaseNotesIsSafeURL(requestURL, _customAllowedURLSchemes, &isAboutBlank);
     
     // Do not allow redirects to dangerous protocols such as file://
     if (!safeURL) {
@@ -195,7 +254,7 @@ static WKUserScript *_userScriptWithInjectedStyleSource(NSString *styleSource)
         decisionHandler(WKNavigationActionPolicyCancel);
     } else {
         // Ensure we're finished loading
-        if (self.completionHandler == nil) {
+        if (_completionHandler == nil) {
             if (!isAboutBlank) {
                 [[NSWorkspace sharedWorkspace] openURL:requestURL];
             }

@@ -6,16 +6,19 @@
 //  Copyright © 2016 Sparkle Project. All rights reserved.
 //
 
-#if __has_feature(modules)
-#if __has_warning("-Watimport-in-framework-header")
-#pragma clang diagnostic ignored "-Watimport-in-framework-header"
-#endif
-@import Foundation;
-#else
 #import <Foundation/Foundation.h>
-#endif
+
+#if defined(BUILDING_SPARKLE_SOURCES_EXTERNALLY)
+// Ignore incorrect warning
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wquoted-include-in-framework-header"
+#import "SPUUserDriver.h"
+#import "SUExport.h"
+#pragma clang diagnostic pop
+#else
 #import <Sparkle/SPUUserDriver.h>
 #import <Sparkle/SUExport.h>
+#endif
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -24,13 +27,13 @@ NS_ASSUME_NONNULL_BEGIN
 /**
  Sparkle's standard built-in user driver for updater interactions
  */
-SU_EXPORT @interface SPUStandardUserDriver : NSObject <SPUUserDriver>
+SU_EXPORT NS_SWIFT_UI_ACTOR @interface SPUStandardUserDriver : NSObject <SPUUserDriver>
 
 /**
  Initializes a Sparkle's standard user driver for user update interactions
  
  @param hostBundle The target bundle of the host that is being updated.
- @param delegate The optional delegate to this user driver.
+ @param delegate The optional delegate to this user driver. Note the standard user driver weakly references the delegate, so you are responsible for keeping it alive.
  */
 - (instancetype)initWithHostBundle:(NSBundle *)hostBundle delegate:(nullable id<SPUStandardUserDriverDelegate>)delegate;
 

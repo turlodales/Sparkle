@@ -1,19 +1,13 @@
-(Insert summary of your pull request here)
+(Insert summary of your pull request here. Major changes in functionality without prior discussion may be rejected.)
 
 Fixes # (issue)
 
-## Checklist:
+## Misc Checklist
 
-- [ ] My change is being tested and reviewed against the Sparkle 2.x branch. New changes must be developed on the 2.x development branch first.
-- [ ] My change is being backported to master branch (Sparkle 1.x). Please create a separate pull request for 1.x, should it be backported. Note 1.x is feature frozen and is only taking bug fixes, localization updates, and critical OS adoption enhancements.
-- [ ] I have reviewed and commented my code, particularly in hard-to-understand areas.
-
-## Type of change
-
-- [ ] Bug fix (non-breaking change which fixes an issue)
-- [ ] New feature (non-breaking change which adds functionality)
-- [ ] Breaking change (fix or feature that would cause existing functionality to not work as expected)
-- [ ] My change is or requires a documentation or localization update
+- [ ] My change requires a documentation update on [Sparkle's website repository](https://github.com/sparkle-project/sparkle-project.github.io)
+- [ ] My change requires changes to generate_appcast, generate_keys, or sign_update
+- [ ] My change updates localizations and I ran Configurations/generate_progress_tool_localizations.py if a string I updated has a comment to run it.
+- [ ] My change was generated/assisted using AI and if so was reviewed by me in whole (explain in detail in the summary)
 
 ## Testing
 

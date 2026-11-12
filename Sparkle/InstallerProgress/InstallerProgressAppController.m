@@ -11,7 +11,6 @@
 #import "SPUMessageTypes.h"
 #import "SULog.h"
 #import "SULog+NSError.h"
-#import "SUApplicationInfo.h"
 #import "SPUInstallerAgentProtocol.h"
 #import "SUInstallerAgentInitiationProtocol.h"
 #import "StatusInfo.h"
@@ -30,44 +29,33 @@
 static const NSTimeInterval SUTerminationTimeDelay = 0.3;
 
 @interface InstallerProgressAppController () <NSApplicationDelegate, SPUInstallerAgentProtocol>
-
-@property (nonatomic, readonly) NSApplication *application;
-@property (nonatomic, weak) id<InstallerProgressDelegate> delegate;
-@property (nonatomic, readonly) NSXPCConnection *connection;
-@property (nonatomic) BOOL connected;
-@property (nonatomic) BOOL repliedToRegistration;
-@property (nonatomic, readonly) SUHost *oldHost;
-@property (nonatomic, readonly) BOOL shouldRelaunchHostBundle;
-@property (nonatomic, readonly) NSString *oldHostBundlePath;
-@property (nonatomic, readonly) BOOL systemDomain;
-@property (nonatomic) StatusInfo *statusInfo;
-@property (nonatomic) BOOL submittedLauncherJob;
-@property (nonatomic) BOOL willTerminate;
-@property (nonatomic) BOOL applicationInitiallyAlive;
-@property (nonatomic) NSBundle *applicationBundle;
-@property (nonatomic) NSString *normalizedPath;
-
 @end
 
 #define CONNECTION_ACKNOWLEDGEMENT_TIMEOUT 7ull
 
 @implementation InstallerProgressAppController
-
-@synthesize application = _application;
-@synthesize delegate = _delegate;
-@synthesize connection = _connection;
-@synthesize connected = _connected;
-@synthesize repliedToRegistration = _repliedToRegistration;
-@synthesize oldHost = _oldHost;
-@synthesize shouldRelaunchHostBundle = _shouldRelaunchHostBundle;
-@synthesize oldHostBundlePath = _oldHostBundlePath;
-@synthesize systemDomain = _systemDomain;
-@synthesize statusInfo = _statusInfo;
-@synthesize submittedLauncherJob = _submittedLauncherJob;
-@synthesize willTerminate = _willTerminate;
-@synthesize applicationInitiallyAlive = _applicationInitiallyAlive;
-@synthesize applicationBundle = _applicationBundle;
-@synthesize normalizedPath = _normalizedPath;
+{
+    NSApplication *_application;
+    NSRunningApplication *_targetRunningApplication;
+    NSXPCConnection *_connection;
+    SUHost *_oldHost;
+    NSString *_oldHostBundlePath;
+    StatusInfo *_statusInfo;
+    NSBundle *_applicationBundle;
+    NSString *_normalizedPath;
+    
+    __weak id<InstallerProgressDelegate> _delegate;
+    
+    void (^_terminationCompletionHandler)(void);
+    
+    BOOL _connected;
+    BOOL _repliedToRegistration;
+    BOOL _shouldRelaunchHostBundle;
+    BOOL _systemDomain;
+    BOOL _submittedLauncherJob;
+    BOOL _willTerminate;
+    BOOL _applicationInitiallyAlive;
+}
 
 - (instancetype)initWithApplication:(NSApplication *)application arguments:(NSArray<NSString *> *)arguments delegate:(id<InstallerProgressDelegate>)delegate
 {
@@ -107,7 +95,7 @@ static const NSTimeInterval SUTerminationTimeDelay = 0.3;
         // This difference is significant. We shouldn't have a model where the 'server' tries to connect to a 'client',
         // nor have a model where a process that runs at the highest level (the installer can run as root) tries to connect to a user level agent or process
         BOOL systemDomain = arguments[2].boolValue;
-        NSXPCConnectionOptions connectionOptions = systemDomain ? NSXPCConnectionPrivileged : 0;
+        NSXPCConnectionOptions connectionOptions = systemDomain ? NSXPCConnectionPrivileged : (NSXPCConnectionOptions)0;
         
         _systemDomain = systemDomain;
         _connection = [[NSXPCConnection alloc] initWithMachServiceName:SPUProgressAgentServiceNameForBundleIdentifier(hostBundleIdentifier) options:connectionOptions];
@@ -124,23 +112,28 @@ static const NSTimeInterval SUTerminationTimeDelay = 0.3;
         
         _connection.remoteObjectInterface = [NSXPCInterface interfaceWithProtocol:@protocol(SUInstallerAgentInitiationProtocol)];
         
-        __weak InstallerProgressAppController *weakSelf = self;
+        __weak __typeof__(self) weakSelf = self;
         _connection.interruptionHandler = ^{
-            [weakSelf.connection invalidate];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                __typeof__(self) strongSelf = weakSelf;
+                if (strongSelf != nil) {
+                    [strongSelf->_connection invalidate];
+                }
+            });
         };
         
         _connection.invalidationHandler = ^{
             dispatch_async(dispatch_get_main_queue(), ^{
-                InstallerProgressAppController *strongSelf = weakSelf;
+                __typeof__(self) strongSelf = weakSelf;
                 if (strongSelf != nil) {
-                    int exitStatus = (strongSelf.repliedToRegistration ? EXIT_SUCCESS : EXIT_FAILURE);
+                    int exitStatus = (strongSelf->_repliedToRegistration ? EXIT_SUCCESS : EXIT_FAILURE);
                     NSError *registrationError;
-                    if (!strongSelf.repliedToRegistration) {
+                    if (!strongSelf->_repliedToRegistration) {
                         registrationError = [NSError errorWithDomain:SUSparkleErrorDomain code:SUAgentInvalidationError userInfo:@{ NSLocalizedDescriptionKey: @"Error: Agent Invalidating without having the chance to reply to installer" }];
                     } else {
                         registrationError = nil;
                     }
-                    if (!strongSelf.willTerminate) {
+                    if (!strongSelf->_willTerminate) {
                         [strongSelf cleanupAndExitWithStatus:exitStatus error:registrationError];
                     }
                 }
@@ -152,22 +145,22 @@ static const NSTimeInterval SUTerminationTimeDelay = 0.3;
 
 - (void)run
 {
-    [self.application run];
+    [_application run];
 }
 
-- (void)startConnection
+- (void)startConnection SPU_OBJC_DIRECT
 {
-    [self.statusInfo startListener];
+    [_statusInfo startListener];
     
-    [self.connection resume];
-    [(id<SUInstallerAgentInitiationProtocol>)self.connection.remoteObjectProxy connectionDidInitiateWithReply:^{
+    [_connection resume];
+    [(id<SUInstallerAgentInitiationProtocol>)_connection.remoteObjectProxy connectionDidInitiateWithReply:^{
         dispatch_async(dispatch_get_main_queue(), ^{
-            self.connected = YES;
+            self->_connected = YES;
         });
     }];
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(CONNECTION_ACKNOWLEDGEMENT_TIMEOUT * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (!self.connected) {
+        if (!self->_connected) {
             SULog(SULogLevelError, @"Timeout error: failed to receive acknowledgement from installer");
             [self cleanupAndExitWithStatus:EXIT_FAILURE error:nil];
         }
@@ -185,64 +178,97 @@ static const NSTimeInterval SUTerminationTimeDelay = 0.3;
         SULog(SULogLevelError, @"Agent failed..");
         SULogError(error);
         
-        [(id<SUInstallerAgentInitiationProtocol>)self.connection.remoteObjectProxy connectionWillInvalidateWithError:error];
+        [(id<SUInstallerAgentInitiationProtocol>)_connection.remoteObjectProxy connectionWillInvalidateWithError:error];
     }
     
-    [self.statusInfo invalidate];
-    [self.connection invalidate];
-    
-    // Remove the agent bundle; it is assumed this bundle is in a temporary/cache/support directory
-    NSError *theError = nil;
-    NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
-    
-    if (![[NSFileManager defaultManager] removeItemAtPath:bundlePath error:&theError]) {
-        SULog(SULogLevelError, @"Couldn't remove agent bundle: %@.", theError);
-    } else {
-        // There should be nothing else in the parent temporary directory given to us,
-        // so let us try to remove it. Note rmdir() will fail if there are unexpectably other
-        // items present
-        NSString *parentDirectory = bundlePath.stringByDeletingLastPathComponent;
-        const char *fileSystemRepresentation = parentDirectory.fileSystemRepresentation;
-        if (fileSystemRepresentation != NULL) {
-            if (rmdir(fileSystemRepresentation) != 0) {
-                SULog(SULogLevelError, @"Failed to remove parent agent bundle directory: %@: %d", parentDirectory, errno);
-            }
-        }
-    }
-    
+    [_statusInfo invalidate];
+    [_connection invalidate];
+
     exit(status);
 }
 
-- (NSArray<NSRunningApplication *> *)runningApplicationsWithBundle:(NSBundle *)bundle
+- (NSArray<NSRunningApplication *> *)runningApplicationsWithBundle:(NSBundle *)bundle SPU_OBJC_DIRECT
 {
-    // Resolve symlinks otherwise when we compare file paths, we may not realize two paths that are represented differently are the same
-    NSArray<NSString *> *bundlePathComponents = bundle.bundlePath.stringByResolvingSymlinksInPath.pathComponents;
+    // Resolve symlinks otherwise when we compare file paths, we may not realize two paths that are represented differently are the same.
+    // Make sure to use -[NSURL URLByResolvingSymlinksInPath] rather than -[NSString stringByResolvingSymlinksInPath]
+    // because the former will normalize it to proper file system representation.
+    // This is also done when retrieving NSRunningApplication path further below
+    NSArray<NSString *> *bundlePathComponents = bundle.bundleURL.URLByResolvingSymlinksInPath.pathComponents;
     NSString *bundleIdentifier = bundle.bundleIdentifier;
     
     NSMutableArray<NSRunningApplication *> *matchedRunningApplications = [[NSMutableArray alloc] init];
     
     if (bundleIdentifier != nil && bundlePathComponents != nil) {
-        NSArray *runningApplications =
-        (bundleIdentifier != nil) ?
-        [NSRunningApplication runningApplicationsWithBundleIdentifier:bundleIdentifier] :
-        [[NSWorkspace sharedWorkspace] runningApplications];
+        NSArray *runningApplications = [NSRunningApplication runningApplicationsWithBundleIdentifier:bundleIdentifier];
+        
+        // If we find any running application that is translocated and looks like the bundle, we should record those too
+        // We will want to terminate those apps and observe their pids, but we will only do this if we don't find any regular matches
+        NSMutableArray<NSRunningApplication *> *potentialMatchingTranslocatedRunningApplications = [[NSMutableArray alloc] init];
+        
+        BOOL needsToHandleImproperBundles;
+        if (@available(macOS 26, *)) {
+            needsToHandleImproperBundles = NO;
+        } else {
+            needsToHandleImproperBundles = YES;
+        }
         
         for (NSRunningApplication *runningApplication in runningApplications) {
             // Comparing the URLs hasn't worked well for me in practice, so I'm comparing the file paths instead
             NSString *candidatePath = runningApplication.bundleURL.URLByResolvingSymlinksInPath.path;
-            if (candidatePath != nil && [candidatePath.pathComponents isEqualToArray:bundlePathComponents]) {
-                [matchedRunningApplications addObject:runningApplication];
+            if (candidatePath != nil) {
+                NSArray<NSString *> *candidatePathComponents = candidatePath.pathComponents;
+
+                if (needsToHandleImproperBundles) {
+                    // Workaround cases where macOS appends Contents/MacOS/<executable> to the bundle path which can happen in corner cases (eg: mishandled bundles or helper executables).
+                    // This may happen with app bundles which have wrapper/tramopline executables that spawn the main executable
+                    // https://github.com/sparkle-project/Sparkle/issues/2725
+                    
+                    NSUInteger candidatePathComponentsCount = candidatePathComponents.count;
+                    // > 3 is fine instead of >= 3 because there should be another parent path component for the bundle
+                    if (candidatePathComponentsCount > 3 && [candidatePathComponents[candidatePathComponentsCount - 3] isEqualToString:@"Contents"] && [candidatePathComponents[candidatePathComponentsCount - 2] isEqualToString:@"MacOS"]) {
+                        
+                        // Lastly verify if the bundle is not actually a directory
+                        // Note the IO check is the last check for this corner case
+                        // This ensures it's not an ordinary helper app that happens to be inside another app bundle.
+                        BOOL candidatePathIsDir = YES;
+                        if ([[NSFileManager defaultManager] fileExistsAtPath:candidatePath isDirectory:&candidatePathIsDir] && !candidatePathIsDir) {
+                            NSMutableArray<NSString *> *trimmedBundlePath = [candidatePathComponents mutableCopy];
+                            [trimmedBundlePath removeObjectsInRange:NSMakeRange(candidatePathComponentsCount - 3, 3)];
+                            candidatePathComponents = trimmedBundlePath;
+                        }
+                    }
+                }
+
+                if ([candidatePathComponents isEqualToArray:bundlePathComponents]) {
+                    [matchedRunningApplications addObject:runningApplication];
+                } else if (matchedRunningApplications.count == 0 && candidatePathComponents.count > 0 && bundlePathComponents.count > 0) {
+                    NSString *lastBundlePathComponent = bundlePathComponents.lastObject;
+                    NSString *lastCandidatePathComponent = candidatePathComponents.lastObject;
+                    if (lastBundlePathComponent != nil && lastCandidatePathComponent != nil && [lastBundlePathComponent isEqualToString:lastCandidatePathComponent] && [candidatePathComponents containsObject:@"AppTranslocation"]) {
+                        [potentialMatchingTranslocatedRunningApplications addObject:runningApplication];
+                    }
+                }
             }
+        }
+        
+        // Non-translocated apps take priority first
+        // And we only use translocated version of apps if there are no regular apps matched
+        if (matchedRunningApplications.count == 0) {
+            [matchedRunningApplications addObjectsFromArray:potentialMatchingTranslocatedRunningApplications];
         }
     }
     
     return [matchedRunningApplications copy];
 }
 
-- (void)registerApplicationBundlePath:(NSString *)applicationBundlePath reply:(void (^)(NSNumber *))reply
+- (void)registerApplicationBundlePath:(NSString *)applicationBundlePath reply:(void (^)(BOOL))reply
 {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (applicationBundlePath != nil && !self.willTerminate) {
+#pragma clang diagnostic push
+#if __has_warning("-Wcompletion-handler")
+#pragma clang diagnostic ignored "-Wcompletion-handler"
+#endif
+        if (applicationBundlePath != nil && !self->_willTerminate && self->_targetRunningApplication == nil) {
             NSBundle *applicationBundle = [NSBundle bundleWithPath:applicationBundlePath];
             if (applicationBundle == nil) {
                 [self cleanupAndExitWithStatus:EXIT_FAILURE error:[NSError errorWithDomain:SUSparkleErrorDomain code:SUAgentInvalidationError userInfo:@{ NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Error: Encountered invalid path for waiting termination: %@", applicationBundlePath] }]];
@@ -251,12 +277,12 @@ static const NSTimeInterval SUTerminationTimeDelay = 0.3;
             // Compute normalized path that we may use later for relaunching the application
             // We compute normalized path from progress agent instead of trusting or having the installer
             // pass it to us
-            if (SPARKLE_NORMALIZE_INSTALLED_APPLICATION_NAME && [applicationBundle.bundlePath isEqualToString:self.oldHostBundlePath]) {
-                NSString *normalizedPath = SUNormalizedInstallationPath(self.oldHost);
+            if (SPARKLE_NORMALIZE_INSTALLED_APPLICATION_NAME && [applicationBundle.bundlePath isEqualToString:self->_oldHostBundlePath]) {
+                NSString *normalizedPath = SUNormalizedInstallationPath(self->_oldHost);
                 // We only use normalized path if it doesn't already exist
                 // Check the installer which has the same logic
                 if (![[NSFileManager defaultManager] fileExistsAtPath:normalizedPath]) {
-                    self.normalizedPath = SUNormalizedInstallationPath(self.oldHost);
+                    self->_normalizedPath = SUNormalizedInstallationPath(self->_oldHost);
                 }
             }
             
@@ -265,32 +291,74 @@ static const NSTimeInterval SUTerminationTimeDelay = 0.3;
             // We're just picking the first running application to send..
             // Ideally we'd send them all and have the installer monitor all of them but I don't want to deal with that complexity at the moment
             // Although that would still have the issue if another instance of the application launched during that duration
-            // At the same time we don't want the installer to be over-reliant on us (the agent tool) in a way that could leave the installer as a zombie by accident
-            // In other words, the installer should be monitoring for dead processes, not us
             // Lastly we don't handle monitoring or terminating processes from logged in users
             NSRunningApplication *firstRunningApplication = runningApplications.firstObject;
-            NSNumber *processIdentifier = (firstRunningApplication == nil || firstRunningApplication.terminated) ? nil : @(firstRunningApplication.processIdentifier);
             
-            reply(processIdentifier);
+            BOOL targetDead = (firstRunningApplication == nil || firstRunningApplication.terminated);
+            if (reply != NULL) {
+                reply(targetDead);
+            }
             
-            self.repliedToRegistration = YES;
-            self.applicationBundle = applicationBundle;
-            self.applicationInitiallyAlive = (processIdentifier != nil);
+            self->_repliedToRegistration = YES;
+            self->_applicationBundle = applicationBundle;
+            self->_applicationInitiallyAlive = !targetDead;
+            self->_targetRunningApplication = firstRunningApplication;
         } else {
-            assert(false);
+            SULog(SULogLevelError, @"Error: -registerApplicationBundlePath:reply: called in unexpected state");
         }
+#pragma clang diagnostic pop
+    });
+}
+
+- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary<NSKeyValueChangeKey,id> *)change context:(void *)context
+{
+    NSString *isTerminatedKeyPath = NSStringFromSelector(@selector(isTerminated));
+    if ([keyPath isEqualToString:isTerminatedKeyPath]) {
+        if (_targetRunningApplication.terminated && _terminationCompletionHandler != nil) {
+            _terminationCompletionHandler();
+            
+            [_targetRunningApplication removeObserver:self forKeyPath:isTerminatedKeyPath];
+            _terminationCompletionHandler = nil;
+            _targetRunningApplication = nil;
+        }
+    } else {
+        [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
+    }
+}
+
+- (void)listenForTerminationWithCompletion:(void (^)(void))completionHandler
+{
+    dispatch_async(dispatch_get_main_queue(), ^{
+#pragma clang diagnostic push
+#if __has_warning("-Wcompletion-handler")
+#pragma clang diagnostic ignored "-Wcompletion-handler"
+#endif
+        if (self->_targetRunningApplication != nil && self->_terminationCompletionHandler == nil) {
+            if (self->_targetRunningApplication.terminated) {
+                if (completionHandler != NULL) {
+                    completionHandler();
+                }
+            } else {
+                self->_terminationCompletionHandler = [completionHandler copy];
+                
+                [self->_targetRunningApplication addObserver:self forKeyPath:NSStringFromSelector(@selector(isTerminated)) options:NSKeyValueObservingOptionNew context:NULL];
+            }
+        } else {
+            SULog(SULogLevelError, @"Error: -listenForTerminationWithCompletion: called in unexpected state");
+        }
+#pragma clang diagnostic pop
     });
 }
 
 - (void)registerInstallationInfoData:(NSData *)installationInfoData
 {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (self.statusInfo.installationInfoData == nil && installationInfoData != nil) {
+        if (self->_statusInfo.installationInfoData == nil && installationInfoData != nil) {
             SPUInstallationInfo *installationInfo = (SPUInstallationInfo *)SPUUnarchiveRootObjectSecurely(installationInfoData, [SPUInstallationInfo class]);
             
             if (installationInfo != nil) {
-                installationInfo.systemDomain = self.systemDomain;
-                self.statusInfo.installationInfoData = SPUArchiveRootObjectSecurely(installationInfo);
+                installationInfo.systemDomain = self->_systemDomain;
+                self->_statusInfo.installationInfoData = SPUArchiveRootObjectSecurely(installationInfo);
             } else {
                 SULog(SULogLevelError, @"Error: Failed to decode initial installation info from installer: %@", installationInfoData);
             }
@@ -301,9 +369,9 @@ static const NSTimeInterval SUTerminationTimeDelay = 0.3;
 - (void)sendTerminationSignal
 {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!self.willTerminate && self.applicationBundle != nil) {
+        if (!self->_willTerminate && self->_applicationBundle != nil) {
             // Note we are sending an Apple quit event, which gives the application or user a chance to delay or cancel the request, which is what we desire
-            for (NSRunningApplication *runningApplication in [self runningApplicationsWithBundle:self.applicationBundle]) {
+            for (NSRunningApplication *runningApplication in [self runningApplicationsWithBundle:self->_applicationBundle]) {
                 [runningApplication terminate];
             }
         }
@@ -313,15 +381,15 @@ static const NSTimeInterval SUTerminationTimeDelay = 0.3;
 - (void)relaunchApplication
 {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!self.willTerminate && self.applicationBundle != nil && self.applicationInitiallyAlive) {
+        if (!self->_willTerminate && self->_applicationBundle != nil && self->_applicationInitiallyAlive) {
             NSString *pathToRelaunch;
-            if (self.normalizedPath != nil) {
-                pathToRelaunch = self.normalizedPath;
-            } else if (self.shouldRelaunchHostBundle) {
-                // Use self.oldHostBundlePath because it was computed before self.oldHost could have been removed
-                pathToRelaunch = self.oldHostBundlePath;
+            if (self->_normalizedPath != nil) {
+                pathToRelaunch = self->_normalizedPath;
+            } else if (self->_shouldRelaunchHostBundle) {
+                // Use self->_oldHostBundlePath because it was computed before self->_oldHost could have been removed
+                pathToRelaunch = self->_oldHostBundlePath;
             } else {
-                pathToRelaunch = self.applicationBundle.bundlePath;
+                pathToRelaunch = self->_applicationBundle.bundlePath;
             }
             
             // We should at least make sure we're opening a bundle
@@ -331,14 +399,14 @@ static const NSTimeInterval SUTerminationTimeDelay = 0.3;
             }
             
             // Note: we can launch application bundles or open plug-in bundles
-            if (![[NSWorkspace sharedWorkspace] openFile:pathToRelaunch]) {
+            if (![[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:pathToRelaunch isDirectory:YES]]) {
                 SULog(SULogLevelError, @"Error: Failed to relaunch bundle at %@", pathToRelaunch);
             }
             
             // Delay termination for a little bit to better increase the chance the updated application when relaunched will be the frontmost application
             // This is related to macOS activation issues when terminating a frontmost application happens right before launching another app
             
-            self.willTerminate = YES;
+            self->_willTerminate = YES;
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(SUTerminationTimeDelay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 [self cleanupAndExitWithStatus:EXIT_SUCCESS error:nil];
             });
@@ -349,18 +417,12 @@ static const NSTimeInterval SUTerminationTimeDelay = 0.3;
 - (void)showProgress
 {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!self.willTerminate) {
-            // Show app icon in the dock
-            ProcessSerialNumber psn = { 0, kCurrentProcess };
-            TransformProcessType(&psn, kProcessTransformToForegroundApplication);
-            
-            // Note: the application icon needs to be set after showing the icon in the dock
-            self.application.applicationIconImage = [SUApplicationInfo bestIconForHost:self.oldHost];
-            
+        if (!self->_willTerminate) {
             // Activate ourselves otherwise we will probably be in the background
-            [self.application activateIgnoringOtherApps:YES];
+            // See comments in -[SPUStandardUserDriver _activateApplication] for why -activate is not used
+            [self->_application activateIgnoringOtherApps:YES];
             
-            [self.delegate installerProgressShouldDisplayWithHost:self.oldHost];
+            [self->_delegate installerProgressShouldDisplayWithHost:self->_oldHost];
         }
     });
 }
@@ -369,13 +431,13 @@ static const NSTimeInterval SUTerminationTimeDelay = 0.3;
 {
     dispatch_async(dispatch_get_main_queue(), ^{
         // Dismiss any UI immediately
-        [self.delegate installerProgressShouldStop];
-        self.delegate = nil;
+        [self->_delegate installerProgressShouldStop];
+        self->_delegate = nil;
         
         // No need to broadcast status service anymore
         // In fact we shouldn't when we decide to relaunch the update
-        [self.statusInfo invalidate];
-        self.statusInfo = nil;
+        [self->_statusInfo invalidate];
+        self->_statusInfo = nil;
     });
 }
 
